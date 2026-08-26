@@ -1,0 +1,29 @@
+schema_version = 1
+id = "three-agent-dev"
+manual = "loop.md"
+
+[tmux]
+layout = "even-horizontal"
+columns = 3
+equal_width = true
+
+[[roles]]
+id = "commander"
+instructions = "commander.md"
+runtime_profile = "codex-crew-three-agent-dev-commander"
+model = "gpt-5.6-sol"
+reasoning_effort = "xhigh"
+
+[[roles]]
+id = "worker"
+instructions = "worker.md"
+runtime_profile = "codex-crew-three-agent-dev-worker"
+model = "gpt-5.6-sol"
+reasoning_effort = "xhigh"
+
+[[roles]]
+id = "judger"
+instructions = "judger.md"
+runtime_profile = "codex-crew-three-agent-dev-judger"
+model = "gpt-5.6-sol"
+reasoning_effort = "xhigh"

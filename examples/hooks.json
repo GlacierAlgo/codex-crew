@@ -1,0 +1,17 @@
+{
+  "description": "Persist Codex Stop snapshots with codex-crew.",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/yanghh/Documents/code/quant/codex-crew/bin/codex-crew hook stop",
+            "timeout": 10,
+            "statusMessage": "Recording Codex turn"
+          }
+        ]
+      }
+    ]
+  }
+}
