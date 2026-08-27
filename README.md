@@ -47,13 +47,18 @@ eval "$(crew --show-completion zsh)"
 `three-agent-dev`。现有 `codex-crew up` 保持兼容；全局 `crew LOOP_ID [PROJECT_DIR]`
 调用同一个 `up_crew` transaction。startup 在一次调用内严格依次完成：
 
-1. 从所选 `loops/<loop-id>/manifest.toml` 加载该 loop 的唯一 runtime authority；
+1. 从所选 schema v2 `loops/<loop-id>/manifest.toml` 加载 ordered roles、exactly one
+   `communication_role` 与其他 runtime authority；
 2. 按 manifest role count 幂等生成并检查 repo-derived profile adapters；
 3. 复用 exact tmux session，只有不存在时才运行
    `tmux new-session -d -s SESSION -c PROJECT_DIR`；
 4. 复用 ready 的 repo-owned App Server，否则 detached 启动并有界等待 readiness；
 5. 调用 native launcher，创建一个 window、manifest-defined 等宽 panes，并等待全部
-   identity bootstrap turns COMMIT。
+   identity bootstrap turns COMMIT；
+6. 向 exact communication thread 自动发送 runtime handoff，并等待 authoritative
+   completed final；
+7. 只有 handoff 第一行 exact `runtime_handoff=ready` 后，才 atomic persist ignored lifecycle
+   record 并返回 `CrewLaunch`。
 
 任一 gate 失败都会非零退出，后续 gate 不会执行，也不会返回 partial launch JSON。
 `up` 不会杀已有 tmux session/window，也不会为失败的 App Server readiness 杀未知 live
@@ -65,14 +70,93 @@ PID。
 - `thread_mapping`，把所选 manifest 的每个 role 映射到精确 native `thread_id`；默认
   mapping keys 是 `commander`、`worker`、`judger`；
 - 每个 pane 已 COMMIT 的 `bootstrap_turn_id` 与 marker；
-- 全部 TUI 共用的 explicit repo Unix endpoint。
+- 全部 TUI 共用的 explicit repo Unix endpoint；
+- `communication_role`、`communication_thread_id`、`communication_pane_id`，以及 completed
+  `handoff_turn_id` / `handoff_status`；
+- `lifecycle_record_path` 与 exact `close_command`。
 
-## Four-way API-budget design
+## One communication thread per loop
+
+每个 manifest 必须且只能声明一个 `communication_role`。启动成功后，用户只与 JSON 中的
+`communication_thread_id` 对应 TUI（也就是 `communication_pane_id`）交互；其他 roles 是
+由它控制的 sub-threads，不直接承担用户沟通。默认 loop 使用 Commander，API-budget loop
+使用 Coordinator。
+
+Automatic runtime handoff 在 launch 返回前完成。它包含 loop/project/session、exact
+window metadata、explicit endpoint 与 ordered role -> exact pane/thread/bootstrap-turn
+mappings，只是 cohort membership/runtime control envelope；不改变 native identity，也不
+转发给 sub-threads。communication role 保存该 envelope 后，其 authoritative final 第一行
+必须严格等于 `runtime_handoff=ready`；substring、附加前缀或后缀均不合格。wrong 或 missing
+readiness marker 都使 launch fail closed、非零退出并保留 window 诊断，不返回 partial
+success。
+
+同一 communication thread 跨轮持续存在。每轮它：
+
+1. 收到用户 task/request 后，先读取目标 threads 的 cumulative token baseline 与 native
+   goal，设置明确 round goal；用户未提供 token budget 时不创建 budget；
+2. 使用 explicit endpoint + exact `thread_id` 和 `crew send`/`wait`/`final` 派发并收集，
+   active turn 不重复 send；
+3. 用每个 thread 的 latest cumulative observation minus baseline 计算 round token delta，
+   报告 model breakdown 与 total；`cachedInputTokens` 是 input subset，不重复相加；
+4. 独立报告 goal `status`、`tokensUsed`、可选 `tokenBudget`、`timeUsedSeconds`，以及
+   communication role 观察到的 round wall elapsed；goal-visible tokens 不与 model token
+   breakdown 混加；
+5. 汇总结果、验收/比较状态、retries 与 remaining blockers，然后询问用户继续、补充/
+   修正，还是结束并回收。未收到用户下一步前不得开始新一轮。
+
+## Recoverable crew teardown
+
+用户选择结束并回收时，communication role 只在自己的 authoritative final 中显示 handoff
+提供的 exact external command，不在当前 active turn 内同步执行：
+
+```bash
+codex-crew crew close --window-id @7
+```
+
+必须等待该 final 完成，再从 crew window 之外的另一 shell 执行。`--window-id` 只接受
+exact tmux ID；CLI 只读取 repository-owned `.codex-crew/runtime/crew-lifecycle/` 下对应的
+managed lifecycle schema v2 record。Record 是 teardown ownership manifest，不是 thread locator 或 binding
+database；`send`、`goal`、`wait`、`final` 等普通 control APIs 不接受 record path/window ID。
+
+Close transaction 按以下顺序 fail closed：
+
+1. 读取并验证 exact record；对所有尚未归档 threads 做 read-only active preflight。任一
+   active/running turn 会在任何 teardown mutation 前阻止 close，并报告 role/thread/turn；
+   close 不 interrupt。
+2. Window reclaim 使用 `pending → started → complete` phase。首次执行先验证 live exact
+   window 的 session、window ID、name/index 与完整 pane ID set，再在 destructive kill 前
+   atomic checkpoint `started`，只执行 `tmux kill-window -t @N`，成功后 checkpoint
+   `complete`。不会 kill tmux session、App Server 或其他 windows。
+3. Retry 看到 `started` 时：若 exact window 仍存在，必须重新验证 exact metadata/panes 后
+   才能重新 kill；若 tmux 明确报告该 exact window 不存在，reconcile 为 `complete`。一般
+   inspection error、错误 window metadata 或 pane mismatch 绝不当作 absent。
+4. 通过 record 内 explicit endpoint + exact native thread IDs，以 sub-threads first、
+   communication role last 调用 `thread/archive`；每成功一个就 atomic checkpoint。
+5. 中途失败保留 record/progress 并列出 remaining roles。Retry 跳过已完成 window/archive
+   stages；若 archive 已成功但 checkpoint 未落盘，则用 archived listing evidence reconcile。
+6. 全部 threads archived 后才删除 managed record，并输出 reclaimed window 与 exact
+   role/thread mapping。
+
+默认语义只有可恢复 archive，没有永久 delete flag；shared tmux session 与 App Server 保留。
+OpenAI Docs 说明 built-in `/archive` 只归档当前 session 并退出 TUI，transcript 仍保留，
+也可用 `codex archive <SESSION>` / `codex unarchive <SESSION>` 管理 saved session；这些单
+session commands 不能替代 cohort teardown。[Codex developer commands](https://developers.openai.com/codex/cli/slash-commands)
+同时说明 `/delete` / `codex delete` 永久删除 transcript，本项目不使用。
+
+OpenAI 当前已将 [custom prompts](https://developers.openai.com/codex/custom-prompts) 标记为
+deprecated，并推荐 [skills](https://developers.openai.com/codex/skills)。Custom prompt 可形成
+`/prompts:name`，但只会扩展并发送一条消息，不能成为 teardown authority；本项目不安装
+该 prompt。若未来需要 inside-Codex ergonomic entrypoint，应实现 skill 且仅准备/展示
+external close command，transaction 仍由 lifecycle CLI 执行。
+
+## Four-way API-budget design with Coordinator
 
 `api-budget-design` 是 optional loop，只在用户明确选择它，或明确要求比较 `N=3/4/5/6`
-四种 API-budget 设计时使用。它用同一 `gpt-5.6-sol` model、`high` reasoning effort、
-Fast service tier 和共同设计合同启动四个相互隔离的 designer；唯一实验变量是 role
-profile 中的 `N`：最多 `N` 个 deep modules，且恰好 `N` 个顶层 public APIs。
+四种 API-budget 设计时使用。它用同一 `gpt-5.6-sol` model、`high` reasoning effort 与
+Fast service tier 启动五个隔离 roles：`coordinator`、`designer_3`、`designer_4`、
+`designer_5`、`designer_6`。Coordinator 是唯一 communication role；四个 designers 是
+sub-threads。designer 的唯一实验变量是 `N`：恰好 `N` 个 counted deep modules，且恰好
+`N` 个顶层 public APIs。
 
 ```bash
 ./bin/codex-crew up /path/to/project --loop api-budget-design --json
@@ -81,62 +165,36 @@ profile 中的 `N`：最多 `N` 个 deep modules，且恰好 `N` 个顶层 publi
 成功 JSON 的 `thread_mapping` 固定包含：
 
 ```text
+coordinator -> exact native communication thread_id
 designer_3 -> exact native thread_id for N=3
 designer_4 -> exact native thread_id for N=4
 designer_5 -> exact native thread_id for N=5
 designer_6 -> exact native thread_id for N=6
 ```
 
-把同一个 new-build 或 migration 请求保存为 `design-request.md`。四次 dispatch 必须读取
-这一个未修改文件，使 request bytes 一致；不要在 request 中注入 `N`，也不要新增 fanout、
-batch 或 aggregator API。将 startup JSON 中的值填入以下变量，并分别保存四次 `send`
-返回的 exact `turn_id`：
-
-```bash
-ENDPOINT='unix:///absolute/path/to/codex-crew/.codex-crew/runtime/app-server.sock'
-DESIGNER_3_THREAD='01...'
-DESIGNER_4_THREAD='01...'
-DESIGNER_5_THREAD='01...'
-DESIGNER_6_THREAD='01...'
-REQUEST_FILE='design-request.md'
-
-./bin/codex-crew crew send --endpoint "$ENDPOINT" --thread-id "$DESIGNER_3_THREAD" --message-file "$REQUEST_FILE" --json
-./bin/codex-crew crew send --endpoint "$ENDPOINT" --thread-id "$DESIGNER_4_THREAD" --message-file "$REQUEST_FILE" --json
-./bin/codex-crew crew send --endpoint "$ENDPOINT" --thread-id "$DESIGNER_5_THREAD" --message-file "$REQUEST_FILE" --json
-./bin/codex-crew crew send --endpoint "$ENDPOINT" --thread-id "$DESIGNER_6_THREAD" --message-file "$REQUEST_FILE" --json
-```
-
-例如把四个返回值分别记为 `TURN_3`、`TURN_4`、`TURN_5`、`TURN_6`，再逐路读取 native
-completion 与 authoritative final：
-
-```bash
-TURN_3='01...'
-TURN_4='01...'
-TURN_5='01...'
-TURN_6='01...'
-
-./bin/codex-crew crew wait --endpoint "$ENDPOINT" --thread-id "$DESIGNER_3_THREAD" --turn-id "$TURN_3" --timeout 120 --json
-./bin/codex-crew crew wait --endpoint "$ENDPOINT" --thread-id "$DESIGNER_4_THREAD" --turn-id "$TURN_4" --timeout 120 --json
-./bin/codex-crew crew wait --endpoint "$ENDPOINT" --thread-id "$DESIGNER_5_THREAD" --turn-id "$TURN_5" --timeout 120 --json
-./bin/codex-crew crew wait --endpoint "$ENDPOINT" --thread-id "$DESIGNER_6_THREAD" --turn-id "$TURN_6" --timeout 120 --json
-
-./bin/codex-crew crew final --endpoint "$ENDPOINT" --thread-id "$DESIGNER_3_THREAD" --turn-id "$TURN_3" --json
-./bin/codex-crew crew final --endpoint "$ENDPOINT" --thread-id "$DESIGNER_4_THREAD" --turn-id "$TURN_4" --json
-./bin/codex-crew crew final --endpoint "$ENDPOINT" --thread-id "$DESIGNER_5_THREAD" --turn-id "$TURN_5" --json
-./bin/codex-crew crew final --endpoint "$ENDPOINT" --thread-id "$DESIGNER_6_THREAD" --turn-id "$TURN_6" --json
-```
-
-四路 thread、context 和 output 完全隔离，不读取彼此结果。每份 final 使用相同 output
-contract：`Assumptions`、`Module map / Deep modules (K <= N)`、
+用户启动后只在 Coordinator pane/thread 输入原始 new-build 或 migration request。
+Coordinator 自己把 byte-identical request 分发给四个 designer threads，不注入 `N` 或
+runtime handoff；operator 不再手工构造 comparison input。四个 designer contexts/output
+互相隔离。每份 final 使用相同
+output contract：`Assumptions`、`Module map / Deep modules (exactly N)`、
 `Public APIs (exactly N)`、
 `Main sequential flows`、`New-build path` 或 `Migration path`、
 `Discarded abstractions and tradeoffs`、`Budget audit`。最后一节必须报告
-`deep_modules=K/N` 与 `public_apis=N/N`。
+`deep_modules=N/N` 与 `public_apis=N/N`，并将每个 `N` 替换为当前 role 的数值 budget。
+任一 module/API count 不匹配的 designer final 均不合规，不得作为 recommendation
+candidate。
 
 Language contract：四个 Designer 的所有 user-facing design output 必须使用中文句法；
+Coordinator 的 comparison output 遵循相同要求。
 technical identifier、API、module、contract、CLI、schema、file path、error text 与标准
 technical term 保留 English 原名，并自然混排在中文句法中。不要附加逐段或整篇
 English translation。
+
+Coordinator 收齐四份 authoritative final `agentMessage` 后，机械计算每份 final 的顶层
+numbered module/API entries，并核对 numeric
+`deep_modules=N/N` 与 `public_apis=N/N` audit；只比较合规方案。最终 comparison 清楚列出
+每个合规 `N` 强制产生的结构决策、取舍、风险与 recommendation，不补写或修复 designer
+方案，也不修改 target worktree。它随后报告本轮 metrics 并等待用户下一步。
 
 ## Repository and runtime boundary
 
@@ -149,6 +207,7 @@ Canonical launcher、startup lifecycle、manifest、role instructions 与 profil
 <codex-crew-repo>/.codex-crew/runtime/app-server.sock
 <codex-crew-repo>/.codex-crew/runtime/app-server.pid
 <codex-crew-repo>/.codex-crew/runtime/app-server.log
+<codex-crew-repo>/.codex-crew/runtime/crew-lifecycle/window-<N>.json
 ```
 
 `.gitignore` 覆盖整个 `.codex-crew/`。`$CODEX_HOME` 继续拥有 Codex auth；`up` 不复制、
@@ -177,6 +236,11 @@ high-level startup 传播给 Codex TUI。
   有界关联；不维护 binding database。
 - 只有 bootstrap turn 已 `completed`，且 authoritative `final_answer`
   `agentMessage` 第一行严格为对应的 `role=<role>`，native identity 才 COMMIT。
+- 全部 identities COMMIT 后，launcher 使用相同 native control path 向 manifest
+  communication thread 发送 runtime handoff；handoff 的 `turn/completed` 与 final-phase
+  `agentMessage` 分别是 completion/final authority。
+- exact readiness 后 atomic lifecycle persist 才是 successful launch 的最终 commit gate；
+  persist failure 保留 window 诊断且不返回 partial success。
 - launch 返回的 native `thread_id` 是后续控制身份。`codex://THREAD_ID` 只可作为
   Codex App 的导航 projection，不是 CLI 或 wire address。
 - tmux 不承载 role message、completion state 或 controller metadata。禁止通过
@@ -204,15 +268,15 @@ lifecycle。`app-server check` 只做连接和 protocol readiness 检查，不�
 
 ## Native launch contract
 
-Launch 没有 partial-success 状态。任一 role 在 deadline 内缺失，或 bootstrap
-`failed`、`interrupted`、缺少/wrong identity final 时，command 以非零状态退出；错误
-包含 exact tmux window ID 与 missing/failed role。已创建的可视 window会保留供诊断，
-launcher 不回退、不猜测 identity。
+Launch 没有 partial-success 状态。任一 role 在 deadline 内缺失、bootstrap
+`failed`/`interrupted`/缺少或 wrong identity final，或 communication handoff 未完成且无
+authoritative final 时，command 都以非零状态退出。错误包含 exact tmux window ID 与
+affected role/thread；已创建的可视 window 保留供诊断，launcher 不回退、不猜测 identity。
 
 生产默认 committed-identity deadline 为 120 秒：launch 最多等待 120 秒，让 manifest
 定义的全部 profiled `high` reasoning、Fast service tier identity turns 完成并满足 COMMIT
 gate。120 秒后仍未全部 COMMIT 才按上述规则非零退出；这不是单次 App Server request
-timeout。
+timeout。handoff wait 另有 120 秒 bound。
 
 启动命令的固定形态为：
 
@@ -273,6 +337,8 @@ uv run codex-crew crew goal clear \
   --endpoint "$ENDPOINT" --thread-id "$WORKER_THREAD" --json
 ```
 
+`--token-budget` 是可选参数；communication role 只有在用户明确给出预算时才使用它。
+
 Runtime invariants：
 
 - `send` 在 `turn/start` 前读取 authoritative turns；对 `-32001` 只做有界 retry。
@@ -283,13 +349,15 @@ Runtime invariants：
   connection 订阅 native events，再 read 一次关闭 completion-before-subscribe race。
 - `turn/completed` 和 final `agentMessage` item 是 completion/final authority；没有
   shared Stop snapshot fallback。
+- Lifecycle record 只能由 `crew close --window-id` 解析；它不能替代 native thread ID。
 
 ## Default Commander–Worker–Judger loop
 
-默认 `three-agent-dev` 的角色固定为 Commander、Worker、Judger：
+默认 `three-agent-dev` 的角色固定为 Commander、Worker、Judger；Commander 是唯一
+communication role：
 
-- Commander 保持 source-read-only，按 `thread_mapping` 派发一个 bounded Worker
-  slice，并用 exact turn wait/final 读取结果。
+- Commander 保持 source-read-only，从 automatic handoff 保存 exact mappings，按用户请求
+  派发一个 bounded Worker slice，并用 exact turn wait/final 读取结果。
 - Worker 是唯一可修改 shared worktree 的角色，运行最小相关验证并按固定 contract
   回报。
 - Judger 保持 source-read-only，只读取本 README，通过这里记录的 public commands
@@ -313,7 +381,9 @@ Checks: public commands/interactions executed and observed outcomes
 Evidence: exit status, stdout/stderr, responses/UI behavior, and public artifacts
 ```
 
-Commander 只有在独立 Judger 返回 `PASS` 后才接受 slice。
+Commander 只有在独立 Judger 返回 fresh `PASS` 后才接受 slice。随后它按统一 lifecycle
+报告 per-thread token delta、goal/time、round wall elapsed、retries 与 blockers，询问用户
+继续、补充/修正，还是结束并回收，然后等待下一步。
 
 ## Independent Stop snapshots
 

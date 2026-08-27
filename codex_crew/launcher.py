@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
+import json
 from pathlib import Path
 import re
 import shlex
@@ -24,9 +25,22 @@ from codex_crew.loop_package import (
     LoopRole,
     load_loop_package,
 )
+from codex_crew.crew_runtime import (
+    CrewRuntimeError,
+    crew_final,
+    crew_send,
+    crew_wait,
+)
+from codex_crew.lifecycle import (
+    LifecycleError,
+    build_lifecycle_record,
+    external_close_command,
+    persist_new_lifecycle_record,
+)
 
 
 DEFAULT_DISCOVERY_TIMEOUT_SECONDS = 120.0
+DEFAULT_HANDOFF_TIMEOUT_SECONDS = 120.0
 DEFAULT_DISCOVERY_POLL_SECONDS = 0.1
 DEFAULT_DISCOVERY_PAGE_LIMIT = 100
 DEFAULT_DISCOVERY_MAX_PAGES = 20
@@ -61,6 +75,11 @@ class CrewLaunch:
     window_name: str
     project_dir: str
     panes: tuple[CrewPane, ...]
+    communication_role: str
+    handoff_turn_id: str
+    handoff_status: str
+    lifecycle_record_path: str
+    close_command: str
 
     @property
     def pane_mapping(self) -> dict[str, str]:
@@ -70,10 +89,23 @@ class CrewLaunch:
     def thread_mapping(self) -> dict[str, str]:
         return {pane.role: pane.thread_id for pane in self.panes}
 
+    @property
+    def communication_pane_id(self) -> str:
+        return self._communication_pane().pane_id
+
+    @property
+    def communication_thread_id(self) -> str:
+        return self._communication_pane().thread_id
+
+    def _communication_pane(self) -> CrewPane:
+        return next(pane for pane in self.panes if pane.role == self.communication_role)
+
     def as_dict(self) -> dict[str, Any]:
         values = asdict(self)
         values["pane_mapping"] = self.pane_mapping
         values["thread_mapping"] = self.thread_mapping
+        values["communication_pane_id"] = self.communication_pane_id
+        values["communication_thread_id"] = self.communication_thread_id
         return values
 
 
@@ -98,6 +130,8 @@ def launch_crew(
     connection_factory: ConnectionFactory = AppServerConnection,
     discovery_timeout_seconds: float = DEFAULT_DISCOVERY_TIMEOUT_SECONDS,
     discovery_poll_seconds: float = DEFAULT_DISCOVERY_POLL_SECONDS,
+    handoff_timeout_seconds: float = DEFAULT_HANDOFF_TIMEOUT_SECONDS,
+    lifecycle_dir: str | Path | None = None,
     sleep: Sleep = time.sleep,
     monotonic: Monotonic = time.monotonic,
     marker_factory: MarkerFactory = lambda: uuid.uuid4().hex,
@@ -114,6 +148,8 @@ def launch_crew(
         raise LaunchError("discovery timeout must be greater than zero")
     if discovery_poll_seconds <= 0:
         raise LaunchError("discovery poll interval must be greater than zero")
+    if handoff_timeout_seconds <= 0:
+        raise LaunchError("handoff timeout must be greater than zero")
     tmux = tmux_executable or _require_executable("tmux")
     codex = codex_executable or _require_executable("codex")
     execute = runner or _run_command
@@ -259,6 +295,82 @@ def launch_crew(
             "window preserved for diagnosis"
         ) from error
 
+    panes = tuple(
+        CrewPane(
+            role=role.id,
+            pane_id=pane_id,
+            runtime_profile=role.runtime_profile,
+            model=role.model,
+            reasoning_effort=role.reasoning_effort,
+            service_tier=role.service_tier,
+            bootstrap_marker=markers[role.id],
+            thread_id=discovered[role.id][0],
+            bootstrap_turn_id=discovered[role.id][1],
+        )
+        for role, pane_id in zip(package.roles, pane_ids, strict=True)
+    )
+    communication_pane = next(
+        pane for pane in panes if pane.role == package.communication_role
+    )
+    close_command = external_close_command(window_id)
+    handoff_message = _runtime_handoff_message(
+        loop_id=package.id,
+        project_dir=str(project),
+        session=session,
+        window_id=window_id,
+        window_index=window_index,
+        window_name=name,
+        endpoint=app_server_endpoint,
+        communication_role=package.communication_role,
+        panes=panes,
+        close_command=close_command,
+    )
+    try:
+        handoff_turn_id, handoff_status = _complete_runtime_handoff(
+            app_server_endpoint,
+            thread_id=communication_pane.thread_id,
+            message=handoff_message,
+            timeout_seconds=handoff_timeout_seconds,
+            connection_factory=connection_factory,
+        )
+    except CrewRuntimeError as error:
+        raise LaunchError(
+            f"crew window {window_id} communication handoff failed for role "
+            f"{package.communication_role!r} thread {communication_pane.thread_id!r}: "
+            f"{error}; window preserved for diagnosis"
+        ) from error
+
+    lifecycle_record = build_lifecycle_record(
+        loop_id=package.id,
+        project_dir=str(project),
+        session=session,
+        window_id=window_id,
+        window_index=window_index,
+        window_name=name,
+        endpoint=app_server_endpoint,
+        communication_role=package.communication_role,
+        roles=[
+            {
+                "role": pane.role,
+                "pane_id": pane.pane_id,
+                "thread_id": pane.thread_id,
+                "bootstrap_turn_id": pane.bootstrap_turn_id,
+            }
+            for pane in panes
+        ],
+        handoff_turn_id=handoff_turn_id,
+        handoff_status=handoff_status,
+    )
+    try:
+        lifecycle_record_path = persist_new_lifecycle_record(
+            lifecycle_record, lifecycle_dir=lifecycle_dir
+        )
+    except LifecycleError as error:
+        raise LaunchError(
+            f"crew window {window_id} lifecycle record persist failed: {error}; "
+            "window preserved for diagnosis"
+        ) from error
+
     return CrewLaunch(
         loop_id=package.id,
         layout=package.layout.name,
@@ -268,21 +380,104 @@ def launch_crew(
         window_index=window_index,
         window_name=name,
         project_dir=str(project),
-        panes=tuple(
-            CrewPane(
-                role=role.id,
-                pane_id=pane_id,
-                runtime_profile=role.runtime_profile,
-                model=role.model,
-                reasoning_effort=role.reasoning_effort,
-                service_tier=role.service_tier,
-                bootstrap_marker=markers[role.id],
-                thread_id=discovered[role.id][0],
-                bootstrap_turn_id=discovered[role.id][1],
-            )
-            for role, pane_id in zip(package.roles, pane_ids, strict=True)
-        ),
+        panes=panes,
+        communication_role=package.communication_role,
+        handoff_turn_id=handoff_turn_id,
+        handoff_status=handoff_status,
+        lifecycle_record_path=str(lifecycle_record_path),
+        close_command=close_command,
     )
+
+
+def _runtime_handoff_message(
+    *,
+    loop_id: str,
+    project_dir: str,
+    session: str,
+    window_id: str,
+    window_index: str,
+    window_name: str,
+    endpoint: str,
+    communication_role: str,
+    panes: tuple[CrewPane, ...],
+    close_command: str,
+) -> str:
+    envelope = {
+        "schema_version": 1,
+        "kind": "codex_crew_runtime_handoff",
+        "loop_id": loop_id,
+        "project_dir": project_dir,
+        "session": session,
+        "window": {
+            "id": window_id,
+            "index": window_index,
+            "name": window_name,
+        },
+        "endpoint": endpoint,
+        "communication_role": communication_role,
+        "external_close_command": close_command,
+        "roles": [
+            {
+                "role": pane.role,
+                "pane_id": pane.pane_id,
+                "thread_id": pane.thread_id,
+                "bootstrap_turn_id": pane.bootstrap_turn_id,
+            }
+            for pane in panes
+        ],
+    }
+    return "CODEX_CREW_RUNTIME_HANDOFF\n" + json.dumps(
+        envelope, ensure_ascii=False, indent=2
+    )
+
+
+def _complete_runtime_handoff(
+    endpoint: str,
+    *,
+    thread_id: str,
+    message: str,
+    timeout_seconds: float,
+    connection_factory: ConnectionFactory,
+) -> tuple[str, str]:
+    started = crew_send(
+        endpoint,
+        thread_id=thread_id,
+        message=message,
+        connection_factory=connection_factory,
+    )
+    if started.turn_id is None:
+        raise CrewRuntimeError("communication handoff dispatch returned no turn id")
+    waited = crew_wait(
+        endpoint,
+        thread_id=thread_id,
+        turn_id=started.turn_id,
+        timeout_seconds=timeout_seconds,
+        connection_factory=connection_factory,
+    )
+    if waited.status != "completed":
+        raise CrewRuntimeError(
+            f"communication handoff turn {started.turn_id!r} ended with "
+            f"status {waited.status!r}"
+        )
+    final = crew_final(
+        endpoint,
+        thread_id=thread_id,
+        turn_id=started.turn_id,
+        connection_factory=connection_factory,
+    )
+    final_text = final.data.get("final_text")
+    first_line = (
+        final_text.splitlines()[0]
+        if isinstance(final_text, str) and final_text.splitlines()
+        else ""
+    )
+    expected = "runtime_handoff=ready"
+    if first_line != expected:
+        raise CrewRuntimeError(
+            f"communication handoff turn {started.turn_id!r} declared first line "
+            f"{first_line!r}; expected {expected!r}"
+        )
+    return started.turn_id, final.status
 
 
 def _discover_bootstrap_threads(

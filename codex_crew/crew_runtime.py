@@ -23,6 +23,8 @@ DEFAULT_RETRY_BASE_SECONDS = 0.1
 DEFAULT_RETRY_JITTER_SECONDS = 0.05
 MAX_MESSAGE_BYTES = 1024 * 1024
 MAX_GOAL_OBJECTIVE_CODE_POINTS = 4000
+DEFAULT_ARCHIVE_LIST_LIMIT = 100
+DEFAULT_ARCHIVE_MAX_PAGES = 20
 _TERMINAL_TURN_STATUSES = frozenset({"completed", "failed", "interrupted"})
 
 
@@ -414,6 +416,72 @@ def crew_goal_clear(
     )
 
 
+def crew_is_archived(
+    endpoint: str,
+    *,
+    thread_id: str,
+    connection_factory: ConnectionFactory = AppServerConnection,
+) -> bool:
+    """Return exact archived-list evidence for one native thread."""
+
+    _validate_thread_id(thread_id)
+    try:
+        with connection_factory(endpoint) as connection:
+            return _archived_listing_contains(connection, thread_id)
+    except CrewRuntimeError:
+        raise
+    except AppServerError as error:
+        raise CrewRuntimeError(str(error)) from error
+
+
+def crew_archive(
+    endpoint: str,
+    *,
+    thread_id: str,
+    connection_factory: ConnectionFactory = AppServerConnection,
+) -> CrewCommandResult:
+    """Archive one exact native thread, reconciling already-archived state."""
+
+    _validate_thread_id(thread_id)
+    if crew_is_archived(
+        endpoint, thread_id=thread_id, connection_factory=connection_factory
+    ):
+        return _result(
+            "archive",
+            endpoint,
+            thread_id,
+            turn_id=None,
+            status="archived",
+            data={"reconciled": True},
+        )
+    try:
+        with connection_factory(endpoint) as connection:
+            response = connection.request("thread/archive", {"threadId": thread_id})
+    except AppServerError as error:
+        if crew_is_archived(
+            endpoint, thread_id=thread_id, connection_factory=connection_factory
+        ):
+            return _result(
+                "archive",
+                endpoint,
+                thread_id,
+                turn_id=None,
+                status="archived",
+                data={"reconciled": True},
+            )
+        raise CrewRuntimeError(str(error)) from error
+    if response is not None and not isinstance(response, Mapping):
+        raise CrewRuntimeError("thread/archive returned malformed response data")
+    return _result(
+        "archive",
+        endpoint,
+        thread_id,
+        turn_id=None,
+        status="archived",
+        data={"reconciled": False},
+    )
+
+
 def _crew_goal_command(
     endpoint: str,
     *,
@@ -446,6 +514,47 @@ def _crew_goal_command(
         status="ok",
         data={"goal": goal},
     )
+
+
+def _archived_listing_contains(
+    connection: AppServerConnection, thread_id: str
+) -> bool:
+    cursor: str | None = None
+    seen_cursors: set[str] = set()
+    for _ in range(DEFAULT_ARCHIVE_MAX_PAGES):
+        params: dict[str, Any] = {
+            "archived": True,
+            "limit": DEFAULT_ARCHIVE_LIST_LIMIT,
+        }
+        if cursor is not None:
+            params["cursor"] = cursor
+        response = connection.request("thread/list", params)
+        if not isinstance(response, Mapping) or not isinstance(
+            response.get("data"), list
+        ):
+            raise CrewRuntimeError("archived thread/list returned malformed data")
+        for summary in response["data"]:
+            if not isinstance(summary, Mapping):
+                raise CrewRuntimeError(
+                    "archived thread/list returned a malformed thread summary"
+                )
+            listed_id = summary.get("id")
+            if not isinstance(listed_id, str) or not listed_id:
+                raise CrewRuntimeError(
+                    "archived thread/list returned a thread without a valid id"
+                )
+            if listed_id == thread_id:
+                return True
+        next_cursor = response.get("nextCursor")
+        if next_cursor is None:
+            return False
+        if not isinstance(next_cursor, str) or not next_cursor:
+            raise CrewRuntimeError("archived thread/list returned invalid nextCursor")
+        if next_cursor in seen_cursors:
+            raise CrewRuntimeError("archived thread/list repeated a pagination cursor")
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
+    raise CrewRuntimeError("archived thread/list exceeded bounded pagination limit")
 
 
 def _read_thread(
@@ -743,6 +852,15 @@ def _thread_status_type(thread: Mapping[str, Any]) -> str:
 
 def _validate_thread_id(thread_id: str) -> None:
     _validate_turn_id(thread_id, "thread id")
+    if (
+        "/" in thread_id
+        or "\\" in thread_id
+        or thread_id.startswith("@")
+        or thread_id.endswith(".json")
+    ):
+        raise CrewRuntimeError(
+            "thread id must be an exact native identity, not a path/window/record locator"
+        )
 
 
 def _validate_turn_id(value: str, label: str) -> None:

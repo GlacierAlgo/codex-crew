@@ -19,6 +19,7 @@ from codex_crew.app_server import (
 )
 from codex_crew.hook import run_stop_hook
 from codex_crew.launcher import CrewLaunch, LaunchError, launch_crew
+from codex_crew.lifecycle import LifecycleError, close_crew
 from codex_crew.loop_package import (
     DEFAULT_LOOP_ID,
     LoopPackageError,
@@ -166,6 +167,7 @@ def loop_list(json_output: bool) -> None:
                         "runtime_profiles": [
                             role.runtime_profile for role in package.roles
                         ],
+                        "communication_role": package.communication_role,
                         "layout": package.layout.name,
                     }
                     for package in packages
@@ -177,7 +179,11 @@ def loop_list(json_output: bool) -> None:
         return
     for package in packages:
         roles = ",".join(role.id for role in package.roles)
-        click.echo(f"{package.id}\troles={roles}\tlayout={package.layout.name}")
+        click.echo(
+            f"{package.id}\troles={roles}\t"
+            f"communication_role={package.communication_role}\t"
+            f"layout={package.layout.name}"
+        )
 
 
 @loop_group.command("install", help="Install managed runtime profile adapters.")
@@ -237,9 +243,27 @@ def app_server_check(endpoint: str) -> None:
     )
 
 
-@cli.group("crew", help="Control one exact App Server native thread.")
+@cli.group("crew", help="Control exact native threads or close one managed crew.")
 def crew_group() -> None:
     pass
+
+
+@crew_group.command(
+    "close", help="Reclaim one managed crew window and archive its exact cohort."
+)
+@click.option("--window-id", required=True, help="Exact managed tmux window ID, e.g. @7.")
+@click.option("--json", "json_output", is_flag=True)
+def crew_close_command(window_id: str, json_output: bool) -> None:
+    try:
+        result = close_crew(window_id)
+    except LifecycleError as error:
+        raise click.ClickException(str(error)) from error
+    if json_output:
+        click.echo(json.dumps(result.as_dict(), ensure_ascii=False, indent=2))
+        return
+    click.echo(f"reclaimed window: {result.window_id}")
+    for role, thread_id in result.archived:
+        click.echo(f"archived: role={role} thread={thread_id}")
 
 
 def _native_thread_options(function):
@@ -664,6 +688,15 @@ def _print_launch(result: CrewLaunch) -> None:
     click.echo(f"app-server: {result.app_server_endpoint}")
     click.echo(f"window: {result.session}:{result.window_index} ({result.window_name})")
     click.echo(f"project: {result.project_dir}")
+    click.echo(
+        f"communication: role={result.communication_role} "
+        f"pane={result.communication_pane_id} "
+        f"thread={result.communication_thread_id} "
+        f"handoff_turn={result.handoff_turn_id} "
+        f"handoff_status={result.handoff_status}"
+    )
+    click.echo(f"lifecycle-record: {result.lifecycle_record_path}")
+    click.echo(f"close: {result.close_command}")
     for pane in result.panes:
         detail = (
             f"{pane.role}: {pane.pane_id} "

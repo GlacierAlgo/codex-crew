@@ -11,6 +11,7 @@ from codex_crew.app_server import (
 )
 from codex_crew.crew_runtime import (
     CrewRuntimeError,
+    crew_archive,
     crew_final,
     crew_goal_clear,
     crew_goal_get,
@@ -61,6 +62,7 @@ class FakeState:
         self.unavailable_count = 0
         self.ambiguous_once = False
         self.disconnect_on_notification = False
+        self.archived = False
 
     def active(self, turn_id: str, message: str = "task") -> dict:
         turn = {
@@ -95,6 +97,14 @@ class FakeConnection:
         self.state.requests.append((method, values))
         if method == "thread/read":
             return {"thread": copy.deepcopy(self.state.thread)}
+        if method == "thread/list":
+            return {
+                "data": ([{"id": THREAD_ID}] if self.state.archived else []),
+                "nextCursor": None,
+            }
+        if method == "thread/archive":
+            self.state.archived = True
+            return None
         if method == "thread/resume":
             return {"thread": {"id": THREAD_ID, "sessionId": THREAD_ID}}
         if method == "turn/start":
@@ -309,7 +319,30 @@ class CrewRuntimeTests(unittest.TestCase):
         )
         self.assertIsNone(clear_result.data["goal"])
 
+    def test_archive_accepts_empty_response_and_reconciles_archived_listing(self) -> None:
+        first = crew_archive(
+            ENDPOINT, thread_id=THREAD_ID, connection_factory=self.factory
+        )
+        second = crew_archive(
+            ENDPOINT, thread_id=THREAD_ID, connection_factory=self.factory
+        )
+
+        self.assertEqual("archived", first.status)
+        self.assertFalse(first.data["reconciled"])
+        self.assertTrue(second.data["reconciled"])
+        self.assertEqual(
+            1,
+            sum(method == "thread/archive" for method, _ in self.state.requests),
+        )
+
     def test_wrong_thread_and_wait_disconnect_fail_closed(self) -> None:
+        with self.assertRaisesRegex(CrewRuntimeError, "not a path/window/record locator"):
+            crew_status(
+                ENDPOINT,
+                thread_id="/repo/runtime/window-7.json",
+                connection_factory=self.factory,
+            )
+
         def wrong_factory(endpoint: str):
             connection = FakeConnection(self.state, endpoint)
             self.state.thread["id"] = "wrong"

@@ -12,6 +12,7 @@ from codex_crew.app_server import AppServerEndpoint
 from codex_crew.cli import cli, crew_entrypoint
 from codex_crew.crew_runtime import CrewCommandResult
 from codex_crew.launcher import CrewLaunch, CrewPane, LaunchError
+from codex_crew.lifecycle import CloseResult
 from codex_crew.startup import StartupError
 
 
@@ -20,6 +21,7 @@ def _launch_result(
     *,
     loop_id: str = "three-agent-dev",
     roles: tuple[str, ...] = ("commander", "worker", "judger"),
+    communication_role: str = "commander",
 ) -> CrewLaunch:
     return CrewLaunch(
         loop_id=loop_id,
@@ -30,6 +32,11 @@ def _launch_result(
         window_index="6",
         window_name="crew-project",
         project_dir="/project",
+        communication_role=communication_role,
+        handoff_turn_id=f"turn-handoff-{communication_role}",
+        handoff_status="completed",
+        lifecycle_record_path="/repo/.codex-crew/runtime/crew-lifecycle/window-7.json",
+        close_command="codex-crew crew close --window-id @7",
         panes=tuple(
             CrewPane(
                 role=role,
@@ -76,7 +83,14 @@ class ClickCliTests(unittest.TestCase):
         up_mock.return_value = _launch_result(
             "unix:///repo/.codex-crew/runtime/app-server.sock",
             loop_id="api-budget-design",
-            roles=("designer_3", "designer_4", "designer_5", "designer_6"),
+            roles=(
+                "coordinator",
+                "designer_3",
+                "designer_4",
+                "designer_5",
+                "designer_6",
+            ),
+            communication_role="coordinator",
         )
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory) / "target"
@@ -183,9 +197,19 @@ class ClickCliTests(unittest.TestCase):
             ["commander", "worker", "judger"],
             packages["three-agent-dev"]["roles"],
         )
+        self.assertEqual("commander", packages["three-agent-dev"]["communication_role"])
         self.assertEqual(
-            ["designer_3", "designer_4", "designer_5", "designer_6"],
+            [
+                "coordinator",
+                "designer_3",
+                "designer_4",
+                "designer_5",
+                "designer_6",
+            ],
             packages["api-budget-design"]["roles"],
+        )
+        self.assertEqual(
+            "coordinator", packages["api-budget-design"]["communication_role"]
         )
         self.assertEqual("even-horizontal", packages["three-agent-dev"]["layout"])
         self.assertEqual("even-horizontal", packages["api-budget-design"]["layout"])
@@ -199,6 +223,15 @@ class ClickCliTests(unittest.TestCase):
         self.assertEqual(0, result.exit_code, result.output)
         payload = json.loads(result.output)
         self.assertEqual("thread-worker", payload["thread_mapping"]["worker"])
+        self.assertEqual("commander", payload["communication_role"])
+        self.assertEqual("thread-commander", payload["communication_thread_id"])
+        self.assertEqual("%10", payload["communication_pane_id"])
+        self.assertEqual("turn-handoff-commander", payload["handoff_turn_id"])
+        self.assertEqual("completed", payload["handoff_status"])
+        self.assertEqual(
+            "codex-crew crew close --window-id @7", payload["close_command"]
+        )
+        self.assertTrue(payload["lifecycle_record_path"].endswith("window-7.json"))
         self.assertEqual(
             {"fast"}, {pane["service_tier"] for pane in payload["panes"]}
         )
@@ -249,12 +282,19 @@ class ClickCliTests(unittest.TestCase):
         )
 
     @patch("codex_crew.cli.up_crew")
-    def test_up_accepts_explicit_four_role_api_budget_loop(self, up_mock) -> None:
-        roles = ("designer_3", "designer_4", "designer_5", "designer_6")
+    def test_up_accepts_explicit_five_role_api_budget_loop(self, up_mock) -> None:
+        roles = (
+            "coordinator",
+            "designer_3",
+            "designer_4",
+            "designer_5",
+            "designer_6",
+        )
         up_mock.return_value = _launch_result(
             "unix:///repo/.codex-crew/runtime/app-server.sock",
             loop_id="api-budget-design",
             roles=roles,
+            communication_role="coordinator",
         )
         result = CliRunner().invoke(
             cli,
@@ -274,6 +314,8 @@ class ClickCliTests(unittest.TestCase):
             {role: f"thread-{role}" for role in roles},
             payload["thread_mapping"],
         )
+        self.assertEqual("coordinator", payload["communication_role"])
+        self.assertEqual("thread-coordinator", payload["communication_thread_id"])
         self.assertEqual(
             {"fast"}, {pane["service_tier"] for pane in payload["panes"]}
         )
@@ -293,6 +335,40 @@ class ClickCliTests(unittest.TestCase):
         self.assertEqual(0, result.exit_code, result.output)
         self.assertEqual(3, result.output.count("service_tier=fast"))
         self.assertEqual(3, result.output.count("reasoning_effort=high"))
+        self.assertIn(
+            "communication: role=commander pane=%10 thread=thread-commander "
+            "handoff_turn=turn-handoff-commander handoff_status=completed",
+            result.output,
+        )
+        self.assertIn("lifecycle-record:", result.output)
+        self.assertIn(
+            "close: codex-crew crew close --window-id @7", result.output
+        )
+
+    def test_crew_close_help_requires_exact_window_and_has_no_delete_option(self) -> None:
+        result = CliRunner().invoke(cli, ["crew", "close", "--help"])
+
+        self.assertEqual(0, result.exit_code, result.output)
+        self.assertIn("--window-id", result.output)
+        self.assertNotIn("--delete", result.output)
+
+    @patch("codex_crew.cli.close_crew")
+    def test_crew_close_json_uses_only_exact_window_record(self, close_mock) -> None:
+        close_mock.return_value = CloseResult(
+            window_id="@7",
+            record_path="/repo/.codex-crew/runtime/crew-lifecycle/window-7.json",
+            archived=(("worker", "thread-worker"), ("commander", "thread-commander")),
+        )
+
+        result = CliRunner().invoke(
+            cli, ["crew", "close", "--window-id", "@7", "--json"]
+        )
+
+        self.assertEqual(0, result.exit_code, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual("closed", payload["status"])
+        self.assertEqual("@7", payload["window_id"])
+        close_mock.assert_called_once_with("@7")
 
     @patch("codex_crew.cli.up_crew")
     def test_up_failure_is_nonzero_and_does_not_emit_partial_json(

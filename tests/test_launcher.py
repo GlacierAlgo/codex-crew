@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import shlex
 import subprocess
@@ -28,8 +29,15 @@ def _completed(
 
 
 class DiscoveryState:
-    def __init__(self, outcomes: dict[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        outcomes: dict[str, str] | None = None,
+        *,
+        handoff_outcome: str = "completed",
+    ) -> None:
         self.outcomes = outcomes or {}
+        self.handoff_outcome = handoff_outcome
+        self.handoff_messages: list[tuple[str, str]] = []
         self.threads: dict[str, dict] = {
             "existing-thread": {
                 "id": "existing-thread",
@@ -131,6 +139,56 @@ class FakeConnection:
             thread = dict(self.state.threads[params["threadId"]])
             thread.pop("source_kind")
             return {"thread": thread}
+        if method == "turn/start":
+            assert params is not None
+            thread_id = params["threadId"]
+            message = params["input"][0]["text"]
+            role = thread_id.removeprefix("thread-")
+            self.state.handoff_messages.append((thread_id, message))
+            status = (
+                "completed"
+                if self.state.handoff_outcome
+                in {
+                    "completed",
+                    "missing_final",
+                    "wrong_readiness",
+                    "missing_readiness",
+                }
+                else self.state.handoff_outcome
+            )
+            items = [
+                {
+                    "type": "userMessage",
+                    "content": [{"type": "text", "text": message}],
+                }
+            ]
+            if self.state.handoff_outcome in {
+                "completed",
+                "wrong_readiness",
+                "missing_readiness",
+            }:
+                final_text = {
+                    "completed": "runtime_handoff=ready\n控制映射已保存。",
+                    "wrong_readiness": (
+                        "prefix runtime_handoff=ready\n错误的 substring acknowledgement。"
+                    ),
+                    "missing_readiness": "控制映射已保存，但未声明 readiness。",
+                }[self.state.handoff_outcome]
+                items.append(
+                    {
+                        "type": "agentMessage",
+                        "phase": "final_answer",
+                        "text": final_text,
+                    }
+                )
+            turn = {
+                "id": f"turn-handoff-{role}",
+                "status": status,
+                "items": items,
+            }
+            self.state.threads[thread_id]["turns"].append(turn)
+            self.state.threads[thread_id]["status"] = {"type": "idle"}
+            return {"turn": turn}
         raise AssertionError((method, params))
 
 
@@ -191,6 +249,10 @@ class LauncherTests(unittest.TestCase):
                 runner=runner,
                 connection_factory=lambda endpoint: FakeConnection(state, endpoint),
                 marker_factory=lambda: "launch-one",
+                lifecycle_dir=project / "lifecycle",
+            )
+            lifecycle_record = json.loads(
+                Path(result.lifecycle_record_path).read_text(encoding="utf-8")
             )
 
         self.assertEqual("even-horizontal", result.layout)
@@ -204,6 +266,22 @@ class LauncherTests(unittest.TestCase):
                 "judger": "thread-judger",
             },
             result.thread_mapping,
+        )
+        self.assertEqual("commander", result.communication_role)
+        self.assertEqual("thread-commander", result.communication_thread_id)
+        self.assertEqual("%10", result.communication_pane_id)
+        self.assertEqual("turn-handoff-commander", result.handoff_turn_id)
+        self.assertEqual("completed", result.handoff_status)
+        self.assertEqual(
+            "codex-crew crew close --window-id @7", result.close_command
+        )
+        self.assertEqual("@7", lifecycle_record["window"]["id"])
+        self.assertEqual(
+            "turn-handoff-commander", lifecycle_record["handoff"]["turn_id"]
+        )
+        self.assertEqual(
+            "pending",
+            lifecycle_record["archive_progress"]["window_reclaim_phase"],
         )
         self.assertNotIn("discovery_complete", result.as_dict())
         self.assertNotIn("discovery_error", result.as_dict())
@@ -246,8 +324,27 @@ class LauncherTests(unittest.TestCase):
             runner.calls,
         )
         self.assertFalse(any(command[1] == "set-option" for command in runner.calls))
+        self.assertEqual(1, len(state.handoff_messages))
+        handoff_thread, handoff_message = state.handoff_messages[0]
+        self.assertEqual("thread-commander", handoff_thread)
+        self.assertTrue(handoff_message.startswith("CODEX_CREW_RUNTIME_HANDOFF\n"))
+        for expected in (
+            '"loop_id": "three-agent-dev"',
+            '"project_dir":',
+            '"session": "default"',
+            '"id": "@7"',
+            '"index": "6"',
+            '"name": "crew-three-agent-dev-',
+            f'"endpoint": "{ENDPOINT}"',
+            '"communication_role": "commander"',
+            '"external_close_command": "codex-crew crew close --window-id @7"',
+            '"pane_id": "%10"',
+            '"thread_id": "thread-worker"',
+            '"bootstrap_turn_id": "turn-judger"',
+        ):
+            self.assertIn(expected, handoff_message)
 
-    def test_api_budget_launch_creates_four_committed_equal_width_roles(self) -> None:
+    def test_api_budget_launch_creates_five_committed_equal_width_roles(self) -> None:
         state = DiscoveryState()
         runner = FakeRunner(state)
         with tempfile.TemporaryDirectory() as directory:
@@ -262,6 +359,7 @@ class LauncherTests(unittest.TestCase):
                 runner=runner,
                 connection_factory=lambda endpoint: FakeConnection(state, endpoint),
                 marker_factory=lambda: "launch-api-budget",
+                lifecycle_dir=project / "lifecycle",
             )
 
         self.assertEqual("api-budget-design", result.loop_id)
@@ -271,6 +369,7 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual("even-horizontal", result.layout)
         self.assertEqual(
             {
+                "coordinator": "thread-coordinator",
                 "designer_3": "thread-designer_3",
                 "designer_4": "thread-designer_4",
                 "designer_5": "thread-designer_5",
@@ -280,27 +379,32 @@ class LauncherTests(unittest.TestCase):
         )
         self.assertEqual(
             {
-                "designer_3": "%10",
-                "designer_4": "%11",
-                "designer_5": "%12",
-                "designer_6": "%13",
+                "coordinator": "%10",
+                "designer_3": "%11",
+                "designer_4": "%12",
+                "designer_5": "%13",
+                "designer_6": "%14",
             },
             result.pane_mapping,
         )
-        self.assertEqual(4, len(result.panes))
+        self.assertEqual(5, len(result.panes))
+        self.assertEqual("coordinator", result.communication_role)
+        self.assertEqual("thread-coordinator", result.communication_thread_id)
+        self.assertEqual("%10", result.communication_pane_id)
+        self.assertEqual("turn-handoff-coordinator", result.handoff_turn_id)
         self.assertEqual({"high"}, {pane.reasoning_effort for pane in result.panes})
         self.assertEqual({"fast"}, {pane.service_tier for pane in result.panes})
         self.assertEqual(
             {"fast"},
             {pane["service_tier"] for pane in result.as_dict()["panes"]},
         )
-        self.assertEqual(3, runner.horizontal_splits)
+        self.assertEqual(4, runner.horizontal_splits)
         self.assertEqual(
             1,
             sum(command[1] == "new-window" for command in runner.calls),
         )
         self.assertEqual(
-            3,
+            4,
             sum(command[1] == "split-window" for command in runner.calls),
         )
         for pane in result.panes:
@@ -314,6 +418,72 @@ class LauncherTests(unittest.TestCase):
             ("/tmux", "select-layout", "-t", "@7", "even-horizontal"),
             runner.calls,
         )
+
+    def test_communication_handoff_failure_is_nonzero_and_preserves_window(self) -> None:
+        cases = {
+            "failed": "status 'failed'",
+            "wrong_readiness": "declared first line 'prefix runtime_handoff=ready'",
+            "missing_readiness": (
+                "declared first line '控制映射已保存，但未声明 readiness。'"
+            ),
+        }
+        for outcome, expected in cases.items():
+            with self.subTest(outcome=outcome):
+                state = DiscoveryState(handoff_outcome=outcome)
+                runner = FakeRunner(state)
+                with tempfile.TemporaryDirectory() as directory:
+                    project = Path(directory)
+                    (project / "README.md").write_text(
+                        "# Product\n", encoding="utf-8"
+                    )
+                    with self.assertRaises(LaunchError) as caught:
+                        launch_crew(
+                            project,
+                            app_server_endpoint=ENDPOINT,
+                            tmux_executable="/tmux",
+                            codex_executable="/codex",
+                            runner=runner,
+                            connection_factory=lambda endpoint: FakeConnection(
+                                state, endpoint
+                            ),
+                            marker_factory=lambda: f"launch-handoff-{outcome}",
+                            lifecycle_dir=project / "lifecycle",
+                        )
+
+                message = str(caught.exception)
+                self.assertIn("crew window @7 communication handoff failed", message)
+                self.assertIn("role 'commander'", message)
+                self.assertIn(expected, message)
+                self.assertIn("window preserved for diagnosis", message)
+                self.assertNotIn(
+                    ("/tmux", "kill-window", "-t", "@7"), runner.calls
+                )
+
+    def test_lifecycle_persist_failure_is_nonzero_and_preserves_window(self) -> None:
+        state = DiscoveryState()
+        runner = FakeRunner(state)
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / "README.md").write_text("# Product\n", encoding="utf-8")
+            lifecycle_path = project / "lifecycle"
+            lifecycle_path.write_text("conflict\n", encoding="utf-8")
+            with self.assertRaises(LaunchError) as caught:
+                launch_crew(
+                    project,
+                    app_server_endpoint=ENDPOINT,
+                    tmux_executable="/tmux",
+                    codex_executable="/codex",
+                    runner=runner,
+                    connection_factory=lambda endpoint: FakeConnection(state, endpoint),
+                    marker_factory=lambda: "launch-lifecycle-failure",
+                    lifecycle_dir=lifecycle_path,
+                )
+
+        message = str(caught.exception)
+        self.assertIn("crew window @7 lifecycle record persist failed", message)
+        self.assertIn("window preserved for diagnosis", message)
+        self.assertEqual(1, len(state.handoff_messages))
+        self.assertNotIn(("/tmux", "kill-window", "-t", "@7"), runner.calls)
 
     def test_discovery_deadline_is_nonzero_failure_and_preserves_window(self) -> None:
         self.assertEqual(120.0, DEFAULT_DISCOVERY_TIMEOUT_SECONDS)
@@ -336,6 +506,7 @@ class LauncherTests(unittest.TestCase):
                     sleep=clock.sleep,
                     monotonic=clock.monotonic,
                     marker_factory=lambda: "launch-timeout",
+                    lifecycle_dir=project / "lifecycle",
                 )
         message = str(caught.exception)
         self.assertIn("crew window @7", message)
@@ -370,6 +541,7 @@ class LauncherTests(unittest.TestCase):
                                 state, endpoint
                             ),
                             marker_factory=lambda: f"launch-{outcome}",
+                            lifecycle_dir=project / "lifecycle",
                         )
                 message = str(caught.exception)
                 self.assertIn("crew window @7", message)
@@ -395,6 +567,7 @@ class LauncherTests(unittest.TestCase):
                     runner=runner,
                     connection_factory=lambda endpoint: FakeConnection(state, endpoint),
                     marker_factory=lambda: "launch-two",
+                    lifecycle_dir=project / "lifecycle",
                 )
         self.assertIn(("/tmux", "kill-window", "-t", "@7"), runner.calls)
 
@@ -416,6 +589,7 @@ class LauncherTests(unittest.TestCase):
                     codex_executable="/codex",
                     runner=runner,
                     connection_factory=unavailable,
+                    lifecycle_dir=project / "lifecycle",
                 )
         self.assertFalse(
             any(command[1] in {"new-window", "split-window"} for command in runner.calls)

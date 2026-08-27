@@ -16,6 +16,7 @@ from typing import Any
 
 from codex_crew.app_server import AppServerEndpoint, AppServerError, check_app_server
 from codex_crew.launcher import CrewLaunch, LaunchError, launch_crew
+from codex_crew.lifecycle import LIFECYCLE_DIR_NAME
 from codex_crew.loop_package import (
     DEFAULT_LOOP_ID,
     LoopPackageError,
@@ -46,6 +47,7 @@ class RepoRuntimePaths:
     socket_path: Path
     pid_path: Path
     log_path: Path
+    lifecycle_dir: Path
     endpoint: str
 
 
@@ -79,6 +81,7 @@ def repo_runtime_paths(repo_root: str | Path | None = None) -> RepoRuntimePaths:
         socket_path=socket_path,
         pid_path=runtime_dir / APP_SERVER_PID_NAME,
         log_path=runtime_dir / APP_SERVER_LOG_NAME,
+        lifecycle_dir=runtime_dir / LIFECYCLE_DIR_NAME,
         endpoint=f"unix://{socket_path}",
     )
 
@@ -160,6 +163,7 @@ def up_crew(
             codex_executable=codex,
             runner=execute,
             loops_dir=loops_dir,
+            lifecycle_dir=paths.lifecycle_dir,
         )
     except LaunchError as error:
         raise StartupError(str(error)) from error

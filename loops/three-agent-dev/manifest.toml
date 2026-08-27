@@ -1,6 +1,7 @@
-schema_version = 1
+schema_version = 2
 id = "three-agent-dev"
 manual = "loop.md"
+communication_role = "commander"
 
 [tmux]
 layout = "even-horizontal"

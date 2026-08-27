@@ -23,7 +23,7 @@ class LoopPackageTests(unittest.TestCase):
             [package.id for package in packages],
         )
         all_roles = tuple(role for package in packages for role in package.roles)
-        self.assertEqual(7, len(all_roles))
+        self.assertEqual(8, len(all_roles))
         self.assertEqual({"gpt-5.6-sol"}, {role.model for role in all_roles})
         self.assertEqual({"high"}, {role.reasoning_effort for role in all_roles})
         self.assertEqual({"fast"}, {role.service_tier for role in all_roles})
@@ -43,6 +43,7 @@ class LoopPackageTests(unittest.TestCase):
             ["commander", "worker", "judger"],
             [role.id for role in package.roles],
         )
+        self.assertEqual("commander", package.communication_role)
         self.assertEqual(
             [
                 "codex-crew-three-agent-dev-commander",
@@ -67,9 +68,10 @@ class LoopPackageTests(unittest.TestCase):
                 (package_root / "loop.md").write_text("# Test loop\n", encoding="utf-8")
                 (package_root / "role.md").write_text("Test role.\n", encoding="utf-8")
                 (package_root / "manifest.toml").write_text(
-                    """schema_version = 1
+                    """schema_version = 2
 id = "test-loop"
 manual = "loop.md"
+communication_role = "role_a"
 
 [tmux]
 layout = "even-horizontal"
@@ -101,18 +103,77 @@ service_tier = "fast"
                 ):
                     load_loop_package("test-loop", loops_dir=loops_root)
 
-    def test_api_budget_design_is_a_four_role_single_variable_package(self) -> None:
+    def test_manifest_requires_exactly_one_valid_communication_role(self) -> None:
+        variants = {
+            "missing": ("", "communication_role must be a non-empty string"),
+            "invalid": (
+                'communication_role = "Invalid Role"\n',
+                "invalid communication_role",
+            ),
+            "non-member": (
+                'communication_role = "observer"\n',
+                "must reference exactly one ordered role",
+            ),
+            "duplicate": (
+                'communication_role = "role_a"\ncommunication_role = "role_b"\n',
+                "cannot read loop manifest",
+            ),
+        }
+        for label, (communication_line, expected) in variants.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                loops_root = Path(directory)
+                package_root = loops_root / "test-loop"
+                package_root.mkdir()
+                (package_root / "loop.md").write_text("# Test loop\n", encoding="utf-8")
+                (package_root / "role.md").write_text("Test role.\n", encoding="utf-8")
+                (package_root / "manifest.toml").write_text(
+                    """schema_version = 2
+id = "test-loop"
+manual = "loop.md"
+"""
+                    + communication_line
+                    + """
+[tmux]
+layout = "even-horizontal"
+columns = 2
+equal_width = true
+
+[[roles]]
+id = "role_a"
+instructions = "role.md"
+runtime_profile = "test-loop-role-a"
+model = "gpt-5.6-sol"
+reasoning_effort = "high"
+service_tier = "fast"
+
+[[roles]]
+id = "role_b"
+instructions = "role.md"
+runtime_profile = "test-loop-role-b"
+model = "gpt-5.6-sol"
+reasoning_effort = "high"
+service_tier = "fast"
+""",
+                    encoding="utf-8",
+                )
+
+                with self.assertRaisesRegex(LoopPackageError, expected):
+                    load_loop_package("test-loop", loops_dir=loops_root)
+
+    def test_api_budget_design_is_a_five_role_exact_budget_package(self) -> None:
         package = load_loop_package("api-budget-design")
 
         self.assertEqual("even-horizontal", package.layout.name)
         self.assertTrue(package.layout.equal_width)
-        self.assertEqual(4, package.layout.columns)
+        self.assertEqual(5, package.layout.columns)
+        self.assertEqual("coordinator", package.communication_role)
         self.assertEqual(
-            ["designer_3", "designer_4", "designer_5", "designer_6"],
+            ["coordinator", "designer_3", "designer_4", "designer_5", "designer_6"],
             [role.id for role in package.roles],
         )
         self.assertEqual(
             [
+                "codex-crew-api-budget-design-coordinator",
                 "codex-crew-api-budget-design-designer-3",
                 "codex-crew-api-budget-design-designer-4",
                 "codex-crew-api-budget-design-designer-5",
@@ -130,15 +191,17 @@ service_tier = "fast"
             "technical identifier、API、module、contract、CLI、schema、file path、error text",
             "不要附加逐段或整篇 English translation",
         )
-        for budget, role in zip(range(3, 7), package.roles, strict=True):
+        designer_instructions = []
+        for budget, role in zip(range(3, 7), package.roles[1:], strict=True):
             instructions = role.instructions_path.read_text(encoding="utf-8")
+            designer_instructions.append(instructions)
             self.assertEqual(1, instructions.count(f"N={budget}"))
             normalized_instructions.add(
                 instructions.replace(f"N={budget}", "N=<budget>")
             )
             for heading in (
                 "Assumptions",
-                "Module map / Deep modules (K <= N)",
+                "Module map / Deep modules (exactly N)",
                 "Public APIs (exactly N)",
                 "Main sequential flows",
                 "New-build path",
@@ -149,7 +212,24 @@ service_tier = "fast"
                 self.assertIn(heading, instructions)
             for requirement in language_contract:
                 self.assertIn(requirement, instructions)
+            self.assertIn("Use exactly N deep modules", instructions)
+            self.assertIn("deep_modules=N/N", instructions)
+            self.assertIn("public_apis=N/N", instructions)
         self.assertEqual(1, len(normalized_instructions))
+
+        coordinator = package.roles[0].instructions_path.read_text(encoding="utf-8")
+        for requirement in (
+            "only user-facing communication role",
+            "runtime control envelope",
+            "byte-identical original design request",
+            "latest cumulative model token observation",
+            "cachedInputTokens",
+            "timeUsedSeconds",
+            "round wall elapsed",
+            "Do not start another round",
+            "Do not read from or modify the target worktree",
+        ):
+            self.assertIn(requirement, coordinator)
 
         root = Path(__file__).resolve().parents[1]
         public_contracts = (
@@ -160,6 +240,26 @@ service_tier = "fast"
             normalized_contract = " ".join(contract.split())
             for requirement in language_contract:
                 self.assertIn(requirement, normalized_contract)
+
+        budget_contracts = (*designer_instructions, coordinator, *public_contracts)
+        forbidden_budget_phrases = (
+            "at " "most N deep modules",
+            "K <" "= N",
+            "K" "/N",
+        )
+        for contract in budget_contracts:
+            for forbidden in forbidden_budget_phrases:
+                self.assertNotIn(forbidden, contract)
+
+        for contract in public_contracts:
+            for requirement in (
+                "designer_3 ->",
+                "designer_6 ->",
+                "coordinator ->",
+                "communication role",
+                "runtime handoff",
+            ):
+                self.assertIn(requirement, contract)
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -175,7 +275,7 @@ service_tier = "fast"
             )
 
         self.assertEqual(installed, checked)
-        self.assertEqual(4, len(checked))
+        self.assertEqual(5, len(checked))
 
     def test_runtime_manual_uses_only_native_thread_control(self) -> None:
         manual = load_loop_package().manual_path.read_text(encoding="utf-8")
@@ -282,6 +382,49 @@ service_tier = "fast"
                     item.adapter_path.read_text(encoding="utf-8"),
                 )
 
+    def test_install_removes_obsolete_managed_profile_after_role_migration(self) -> None:
+        package = load_loop_package("api-budget-design")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            codex_home = root / "codex-home"
+            managed_root = root / "managed"
+            install_loop_package(
+                package, codex_home=codex_home, managed_root=managed_root
+            )
+            obsolete_adapter = (
+                managed_root
+                / package.id
+                / "codex-crew-api-budget-design-old-role.config.toml"
+            )
+            obsolete_adapter.write_text(
+                "# @generated by codex-crew loop adapter v1\nold\n",
+                encoding="utf-8",
+            )
+            obsolete_symlink = codex_home / obsolete_adapter.name
+            obsolete_symlink.symlink_to(obsolete_adapter)
+
+            with self.assertRaisesRegex(
+                LoopPackageError, "obsolete managed adapters remain"
+            ):
+                check_loop_installation(
+                    package, codex_home=codex_home, managed_root=managed_root
+                )
+            install_loop_package(
+                package, codex_home=codex_home, managed_root=managed_root
+            )
+
+            self.assertFalse(obsolete_adapter.exists())
+            self.assertFalse(obsolete_symlink.is_symlink())
+            self.assertEqual(
+                5,
+                len(
+                    check_loop_installation(
+                        package,
+                        codex_home=codex_home,
+                        managed_root=managed_root,
+                    )
+                ),
+            )
     def test_install_preflight_fails_closed_on_runtime_conflicts(self) -> None:
         package = load_loop_package()
         first_role = package.roles[0]

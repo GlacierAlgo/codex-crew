@@ -115,6 +115,9 @@ class LaunchRecorder:
         self.calls.append((project, dict(kwargs)))
         roles = load_loop_package(loops_dir=kwargs["loops_dir"]).roles
         endpoint = kwargs["app_server_endpoint"]
+        communication_role = load_loop_package(
+            kwargs["loop_id"], loops_dir=kwargs["loops_dir"]
+        ).communication_role
         return CrewLaunch(
             loop_id=kwargs["loop_id"],
             layout="even-horizontal",
@@ -124,6 +127,13 @@ class LaunchRecorder:
             window_index="1",
             window_name=kwargs["window_name"] or "crew-project",
             project_dir=str(project),
+            communication_role=communication_role,
+            handoff_turn_id=f"turn-handoff-{communication_role}",
+            handoff_status="completed",
+            lifecycle_record_path=str(
+                Path(kwargs["lifecycle_dir"]) / "window-7.json"
+            ),
+            close_command="codex-crew crew close --window-id @7",
             panes=tuple(
                 CrewPane(
                     role=role.id,
@@ -151,6 +161,9 @@ class StartupTests(unittest.TestCase):
         self.assertEqual(paths.runtime_dir / "app-server.sock", paths.socket_path)
         self.assertEqual(paths.runtime_dir / "app-server.pid", paths.pid_path)
         self.assertEqual(paths.runtime_dir / "app-server.log", paths.log_path)
+        self.assertEqual(
+            paths.runtime_dir / "crew-lifecycle", paths.lifecycle_dir
+        )
         self.assertEqual(f"unix://{paths.socket_path}", paths.endpoint)
         self.assertIn(".codex-crew/", (ROOT / ".gitignore").read_text(encoding="utf-8"))
 
@@ -233,6 +246,7 @@ class StartupTests(unittest.TestCase):
                 self.assertEqual(paths.endpoint, launch_options["app_server_endpoint"])
                 self.assertEqual("/fake/codex", launch_options["codex_executable"])
                 self.assertEqual("/fake/tmux", launch_options["tmux_executable"])
+                self.assertEqual(paths.lifecycle_dir, launch_options["lifecycle_dir"])
             for role in package.roles:
                 symlink = codex_home / f"{role.runtime_profile}.config.toml"
                 self.assertTrue(symlink.is_symlink())

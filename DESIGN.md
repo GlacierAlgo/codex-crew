@@ -2,17 +2,18 @@
 
 ## Authorities
 
-`loops/index.md` 负责 loop routing；所选 `loops/<loop-id>/manifest.toml` 分别负责该
-package 的 ordered roles、runtime profiles、model、reasoning effort、service tier 与
-tmux layout。`three-agent-dev` 仍是默认 loop。Package-local Role Markdown 是唯一
+`loops/index.md` 负责 loop routing；所选 schema v2 `loops/<loop-id>/manifest.toml` 分别负责
+该 package 的 ordered roles、exactly one `communication_role`、runtime profiles、model、
+reasoning effort、service tier 与 tmux layout。`three-agent-dev` 仍是默认 loop。Package-local Role Markdown 是唯一
 editable instruction source，installed profile TOML 只是派生 adapter。
 
 Native `thread_id` 是 control identity。App Server 保存 thread/turn/item lifecycle；
-codex-crew 不复制该 authority 到 SQLite 或 tmux。
+codex-crew 不复制该 authority 到 SQLite 或 tmux。Ignored lifecycle record 只拥有 exact
+cohort teardown scope/progress，不是 communication identity 或 binding database。
 
 ```mermaid
 flowchart TD
-    MANIFEST["manifest.toml<br/>roles / profile config / layout"]
+    MANIFEST["manifest.toml<br/>roles / communication role / profile / layout"]
     UP["crew / up<br/>ordered startup gates"]
     PROFILES["repo generated profiles<br/>CODEX_HOME symlinks"]
     SESSION["exact tmux session<br/>reuse or create"]
@@ -20,6 +21,7 @@ flowchart TD
     LAUNCHER["launcher<br/>tmux layout + TUI bootstrap"]
     APP["Codex App Server<br/>thread / turn / item authority"]
     CLI["crew CLI<br/>endpoint + thread_id"]
+    LIFECYCLE["crew lifecycle record<br/>window scope / archive progress"]
     TMUX["tmux window<br/>visual panes only"]
     STOP["Stop Hook SQLite<br/>independent snapshots"]
     subgraph NATIVE_RUNTIME["Native-thread runtime"]
@@ -36,7 +38,9 @@ flowchart TD
     REPO_RUNTIME --> APP
     LAUNCHER --> TMUX
     LAUNCHER --> APP
+    LAUNCHER --> LIFECYCLE
     CLI --> APP
+    CLI --> LIFECYCLE
     STOP -. "no target-resolution dependency" .-> APP
 ```
 
@@ -61,7 +65,7 @@ only the stable pre-launch orchestration and returns the unchanged `CrewLaunch` 
    permits cleanup only of the exact PID/socket paths. An invalid PID, orphan socket, or live PID
    paired with an unready endpoint fails closed without killing or launching over that process.
 5. Only after every gate succeeds, call `launch_crew` with the same resolved `codex`, `tmux`,
-   project, session, loop, and explicit repo endpoint.
+   project, session, loop, explicit repo endpoint, and repository runtime lifecycle directory.
 
 Every high-level `crew`/`up` target therefore shares the repository-owned explicit socket
 `unix://<repo>/.codex-crew/runtime/app-server.sock`; this endpoint is never bare `unix://`.
@@ -80,26 +84,40 @@ canonical source. The tracked authorities remain `bin/`, `codex_crew/`, and `loo
 3. Generate one launch nonce and one role-specific marker. Each pane starts a fresh Codex TUI:
    `--profile`, `--strict-config`, `--yolo`, `--remote`, `-C`, bootstrap prompt.
 4. Create one window, split horizontally `role_count - 1` times, and apply `even-horizontal`.
-   The default `three-agent-dev` therefore splits twice; `api-budget-design` splits three times.
+   The default `three-agent-dev` therefore splits twice; `api-budget-design` splits four times for
+   its five roles.
    No tmux option is a control-plane field.
 5. Poll `thread/list`, subtract the pre-launch set, and `thread/read(includeTurns=true)` only the
    candidates. A correlation requires the exact marker line, exact `role=...` line, the
    `cwd`-filtered list, `turn.status=completed`, and an authoritative final-phase `agentMessage`
    whose first line exactly equals `role=<role>`.
-6. Return a `CrewLaunch` only after every manifest-defined role COMMIT. For the default
-   `three-agent-dev` this remains all three roles; for `api-budget-design` it is all four designers.
-   Deadline, `failed`, `interrupted`, wrong identity, missing final, or ambiguous matches raise
+6. After every manifest-defined role COMMIT, build an in-memory cohort envelope containing loop,
+   project, session, exact window metadata, endpoint, communication role, and ordered
+   role -> pane/thread/bootstrap-turn mappings. Send it through native `turn/start` to the exact
+   communication thread, then wait for `turn/completed` and read the authoritative final-phase
+   `agentMessage`.
+7. After the communication handoff completed with first line exact `runtime_handoff=ready`, atomically
+   persist the managed lifecycle record under `.codex-crew/runtime/crew-lifecycle/`. Persist failure
+   preserves the window and returns no partial launch result.
+8. Return a `CrewLaunch` only after record persistence. It exposes exact
+   communication role/thread/pane plus handoff turn/status. For `three-agent-dev` the communication
+   role is Commander; for `api-budget-design` it is Coordinator followed by four designers. It also
+   exposes the record path and exact external close command.
+   Bootstrap or handoff deadline, `failed`, `interrupted`, wrong identity, missing final, or ambiguous matches raise
    `LaunchError` with the exact window ID and affected role. The CLI exits nonzero while preserving
    the visual window for diagnosis.
 
 The production committed-identity deadline is 120 seconds for all manifest-defined profiled
-`high` reasoning, Fast service tier bootstrap turns. The default loop has three turns and the
-API-budget loop has four. Tests inject much smaller deadlines to exercise the same fail-closed path
-without weakening the production default.
+`high` reasoning, Fast service tier bootstrap turns, and the handoff wait has its own 120-second
+bound. The default loop has three bootstrap turns plus one Commander handoff turn. The API-budget
+loop has five bootstrap turns—one Coordinator and four designers—plus one Coordinator handoff
+turn. Tests inject smaller bounded values where needed without weakening production defaults.
 
-No `thread/start`, binding insert, or `codex resume` occurs before TUI startup. A tmux creation
-failure kills only the just-created window. Discovery failure after successful pane startup leaves
-the visible window intact but never returns a partial-success launch result.
+No `thread/start`, binding insert, or `codex resume` occurs before all TUI identity bootstraps
+COMMIT; the first controller-created turn is the communication handoff. A tmux creation failure
+kills only the just-created window. Discovery or handoff failure after successful pane startup
+leaves the visible window intact but never returns a partial-success launch result. The handoff
+envelope is not a binding; the post-handoff record is only a teardown ownership/progress manifest.
 
 ## Native control
 
@@ -115,6 +133,8 @@ Every crew operation accepts `endpoint` and one exact `thread_id`:
 - `final`: read only and require a completed turn with an authoritative final-phase
   `agentMessage`.
 - `goal`: direct `thread/goal/get|set|clear` calls.
+- `archive`: exact `thread/archive`; empty response is valid, and exact archived `thread/list`
+  evidence reconciles a success that was not checkpointed.
 
 `thread/resume` is not identity creation or configuration replay. It exists only inside an active
 `wait` subscription window because `thread/read` is intentionally non-subscribing.
@@ -122,6 +142,28 @@ Every crew operation accepts `endpoint` and one exact `thread_id`:
 The native control module has no tmux query/mutation function, role lookup, window locator,
 database path, binding dataclass, or shared Stop fallback. Unknown/malformed thread state and Unix
 WebSocket protocol violations fail closed.
+
+## Recoverable close transaction
+
+`crew close --window-id @N` validates the window ID and loads only the corresponding managed
+schema v2 record. Before mutation it reads every remaining exact thread and refuses active turns.
+Window reclaim is an atomic `pending → started → complete` state machine. The first attempt compares
+live tmux session/window/name/index and pane set, checkpoints `started` before kill, kills only the
+exact window, then checkpoints `complete`.
+
+A `started` retry revalidates and kills when the exact window still exists. Only an explicit exact
+tmux window-absent result reconciles directly to `complete`; general inspection failure, wrong
+metadata, and pane mismatch remain errors. This closes the crash window between successful kill and
+the completion checkpoint without broadening the destructive target.
+
+Archive order is all sub-threads followed by the communication role. Each successful native
+archive atomically extends `archived_roles`; failure leaves the record and reports remaining roles.
+A retry skips checkpointed stages and uses archived listing evidence to reconcile an archive that
+completed before its checkpoint. The managed record is removed only after the full cohort is
+archived. The shared tmux session and App Server remain live; no transcript delete surface exists.
+
+Lifecycle accepts window ID only. Ordinary send/wait/final/goal APIs continue to reject path,
+window, and record locators and accept only exact native thread IDs.
 
 ## Independent Stop snapshots
 
@@ -135,8 +177,9 @@ hook observation from overriding App Server turn/item authority.
 ## Public compatibility boundary
 
 This migration intentionally removes window/role binding-backed target resolution and
-direct/app-server runtime selection. No compatibility module, lazy re-export, deprecated schema,
-or alternate wire URI remains.
+direct/app-server runtime selection. Manifest schema v2 requires exactly one communication role;
+the API package has no legacy summary role/profile/source shim. No compatibility module, lazy
+re-export, deprecated schema, or alternate wire URI remains.
 
 `crew LOOP_ID [PROJECT_DIR]` is the primary global startup surface, while `codex-crew up` remains
 the compatible repository CLI surface. Low-level `launch` remains an endpoint diagnostic and does
