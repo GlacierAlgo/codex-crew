@@ -92,15 +92,17 @@ success。
 
 同一 communication thread 跨轮持续存在。每轮它：
 
-1. 收到用户 task/request 后，先读取目标 threads 的 cumulative token baseline 与 native
-   goal，设置明确 round goal；用户未提供 token budget 时不创建 budget；
+1. 收到用户 task/request 后，先读取目标 threads 的 authoritative status 与 native goal，
+   设置明确 round goal；用户未提供 token budget 时不创建 budget；
 2. 使用 explicit endpoint + exact `thread_id` 和 `crew send`/`wait`/`final` 派发并收集，
    active turn 不重复 send；
-3. 用每个 thread 的 latest cumulative observation minus baseline 计算 round token delta，
-   报告 model breakdown 与 total；`cachedInputTokens` 是 input subset，不重复相加；
-4. 独立报告 goal `status`、`tokensUsed`、可选 `tokenBudget`、`timeUsedSeconds`，以及
-   communication role 观察到的 round wall elapsed；goal-visible tokens 不与 model token
-   breakdown 混加；
+3. 每个 target 完成后读取 native goal；必须报告 goal `status`、`tokensUsed`、可选
+   `tokenBudget`、`timeUsedSeconds`，以及 communication role 观察到的 round wall elapsed；
+4. model token observation 是 optional：仅当对应 exact `crew wait` 返回 `token_usage` 时，
+   才将其标为该 wait 实际观察到的 cumulative value；缺失必须披露但不阻塞 round。不得将
+   未观察 baseline 当作 zero，也不得虚构 round delta 或 model total。展示 optional breakdown
+   时，`cachedInputTokens` 是 input subset，不重复相加；goal-visible tokens 与 model
+   observation 不混加；
 5. 汇总结果、验收/比较状态、retries 与 remaining blockers，然后询问用户继续、补充/
    修正，还是结束并回收。未收到用户下一步前不得开始新一轮。
 
@@ -382,7 +384,7 @@ Evidence: exit status, stdout/stderr, responses/UI behavior, and public artifact
 ```
 
 Commander 只有在独立 Judger 返回 fresh `PASS` 后才接受 slice。随后它按统一 lifecycle
-报告 per-thread token delta、goal/time、round wall elapsed、retries 与 blockers，询问用户
+报告 required per-thread native goal token/time、round wall elapsed、retries 与 blockers，询问用户
 继续、补充/修正，还是结束并回收，然后等待下一步。
 
 ## Independent Stop snapshots

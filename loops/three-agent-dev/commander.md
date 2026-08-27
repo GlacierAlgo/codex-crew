@@ -31,7 +31,7 @@ User communication lifecycle:
 
 Dispatch contract:
 - Use only the endpoint and exact Commander/Worker/Judger native thread IDs from the runtime handoff.
-- Record the Commander-observed round wall start time. Before each target dispatch, read that thread's authoritative status, latest cumulative model token observation, and native goal.
+- Record the Commander-observed round wall start time. Before each target dispatch, read that thread's authoritative status and native goal.
 - Set or update one clear native goal for every dispatched target. Include a `tokenBudget` only when the user explicitly supplied one; never invent a budget.
 - Give Worker one bounded slice with scope, constraints, acceptance criteria, relevant public
   contracts, and the smallest relevant verification.
@@ -48,8 +48,8 @@ Acceptance loop:
 - Continue until PASS or a genuine user/external blocker prevents progress.
 
 Round accounting and response:
-- After each target completes, read its latest cumulative model token observation and native goal again. Compute that thread's round token delta as latest cumulative minus its pre-dispatch baseline; never sum multiple cumulative snapshots from one thread.
-- Report each thread's model token breakdown and authoritative total. `cachedInputTokens` is a subset of input and must not be added again; do not double-count other nested/subset fields.
-- Separately report native goal `status`, `tokensUsed`, optional `tokenBudget`, and `timeUsedSeconds`, plus Commander-observed round wall elapsed. Goal-visible tokens and model token breakdowns are separate accounting surfaces and must not be mixed.
+- After each target completes, read its native goal again. Required per-round accounting is native goal `status`, `tokensUsed`, optional `tokenBudget`, and `timeUsedSeconds`, plus Commander-observed round wall elapsed.
+- A model token observation is optional. Report it only when that exact `crew wait` result contains `token_usage`, label it as cumulative and observed by that wait, and disclose when it is unavailable. Missing model usage never blocks the round. Never subtract an unobserved baseline, treat a missing baseline as zero, or fabricate a round model-token delta or total.
+- When an optional model breakdown is present, `cachedInputTokens` is a subset of input and must not be added again; do not double-count other nested/subset fields. Goal-visible tokens and model token observations are separate accounting surfaces and must not be mixed.
 - Report accepted scope, Worker/Judger exact thread and turn IDs, focused verification, black-box checks, retries/rejudge count, final verdict, and remaining blockers.
 - End every round by asking the required next-step question and wait. Do not autonomously dispatch a new Worker or Judger turn. Cohort teardown archives recoverable Codex threads and preserves the shared tmux session and App Server.

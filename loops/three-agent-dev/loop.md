@@ -61,8 +61,8 @@ WORKER_THREAD=01...
 JUDGER_THREAD=01...
 ```
 
-每轮派发前，Commander 对目标 thread 读取 cumulative token baseline 与 native goal，并设置
-明确 round goal；只有用户提供 token budget 时才传 `tokenBudget`。然后派发完整 Worker slice：
+每轮派发前，Commander 对目标 thread 读取 authoritative status 与 native goal，并设置明确
+round goal；只有用户提供 token budget 时才传 `tokenBudget`。然后派发完整 Worker slice：
 
 ```bash
 codex-crew crew status --endpoint "$ENDPOINT" --thread-id "$WORKER_THREAD" --json
@@ -114,13 +114,14 @@ projection，不是 wire scheme。
 
 ## Round accounting and user gate
 
-- 每个 target completion 后，Commander 读取该 thread latest cumulative token observation，
-  以 latest minus baseline 计算本轮 delta；同一 thread 不累加多个 cumulative snapshots。
-- 报告 model token breakdown 与 authoritative total；`cachedInputTokens` 是 input subset，
-  不得重复计入 total，其他 nested/subset fields 同理。
-- native goal 的 `status`、`tokensUsed`、可选 `tokenBudget`、`timeUsedSeconds` 独立报告；
-  另报 Commander-observed round wall elapsed。goal-visible tokens 与 model token breakdown
-  不混加。
+- 每个 target completion 后，Commander 再读取 native goal。每轮必须报告 goal `status`、
+  `tokensUsed`、可选 `tokenBudget`、`timeUsedSeconds`，另报 Commander-observed round wall
+  elapsed。
+- model token observation 是 optional：只在该 exact `crew wait` 结果包含 `token_usage` 时
+  报告，并标为该 wait 实际观察到的 cumulative value；缺失时明确 unavailable，但不得阻塞
+  round。不得把未观察 baseline 当作 zero，也不得据此虚构 round delta 或 model total。
+- 展示 optional model breakdown 时，`cachedInputTokens` 是 input subset，不得重复计入，
+  其他 nested/subset fields 同理。goal-visible tokens 与 model observation 不混加。
 - 汇总结果、fresh PASS 状态、retries/rejudge count 与 remaining blockers 后，Commander 必须
   询问用户继续下一轮、补充/修正，还是结束并回收。未收到下一步前不得自行 dispatch。
 - 同一 Commander thread 跨轮持续存在。用户选择结束并回收时，Commander 只在当前 final
@@ -169,8 +170,9 @@ Evidence: exit status, stdout/stderr, responses/UI behavior, and public artifact
 - Completion comes from `turn/completed`; final comes from authoritative final `agentMessage`.
 - Launch success requires a completed authoritative Commander runtime handoff turn.
 - tmux is visual layout only and carries no shared role message or lifecycle state.
-- Token columns are cumulative per native thread; sum only each thread's latest observation.
-- Goal-visible tokens and model token breakdowns remain separate accounting.
+- Native goal accounting is the required per-round token/time surface. Model token observations are
+  optional, cumulative values visible only to the exact wait that received their notification.
+- Goal-visible tokens and optional model token observations remain separate accounting.
 
 ## Finish
 

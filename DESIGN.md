@@ -128,8 +128,8 @@ Every crew operation accepts `endpoint` and one exact `thread_id`:
   transport outcome from the before/after turn set and exact user item.
 - `steer`: read and require `expectedTurnId` to equal the authoritative active turn.
 - `wait`: read, return immediately if terminal, otherwise bare `thread/resume` to subscribe the
-  current connection, read again, then consume `item/completed`, token usage,
-  `turn/completed`, and status events for the exact thread/turn.
+  current connection, read again, then consume `item/completed`, optional
+  `thread/tokenUsage/updated`, `turn/completed`, and status events for the exact thread/turn.
 - `final`: read only and require a completed turn with an authoritative final-phase
   `agentMessage`.
 - `goal`: direct `thread/goal/get|set|clear` calls.
@@ -138,6 +138,16 @@ Every crew operation accepts `endpoint` and one exact `thread_id`:
 
 `thread/resume` is not identity creation or configuration replay. It exists only inside an active
 `wait` subscription window because `thread/read` is intentionally non-subscribing.
+
+Codex App Server 0.150.1 exposes per-thread model token usage as the independent
+`thread/tokenUsage/updated` notification; `Thread`/`Turn` read schemas provide no usage field or
+per-thread usage pull request. The observable schema does not guarantee that this notification
+precedes `turn/completed`, so an exact wait may complete without observing model usage. Native goal
+`status`, `tokensUsed`, optional `tokenBudget`, and `timeUsedSeconds` are therefore the required
+per-round accounting surface. A wait's `token_usage`, when present, is only an optional observed
+cumulative model value: absence does not block completion, is never treated as zero, and cannot
+support delta subtraction without an observed baseline. `cachedInputTokens` remains an input subset
+when that optional breakdown is displayed.
 
 The native control module has no tmux query/mutation function, role lookup, window locator,
 database path, binding dataclass, or shared Stop fallback. Unknown/malformed thread state and Unix

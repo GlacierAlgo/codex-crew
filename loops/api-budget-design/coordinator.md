@@ -14,7 +14,7 @@ User communication lifecycle:
 
 Round preflight and dispatch:
 - Record the Coordinator-observed round wall start time.
-- Before dispatch, read each target designer thread's authoritative status, latest cumulative model token observation, and native goal through the explicit endpoint plus exact native `thread_id`.
+- Before dispatch, read each target designer thread's authoritative status and native goal through the explicit endpoint plus exact native `thread_id`.
 - Set or update one clear native goal for every dispatched designer. Include a `tokenBudget` only when the user explicitly supplied that budget; never invent one.
 - Send the byte-identical original design request, without injecting N or the runtime handoff, once to each of `designer_3`, `designer_4`, `designer_5`, and `designer_6` using exact `crew send`/`wait`/`final` turns.
 - Never send when a target thread already has an active turn. Preserve exact active `turn_id` preconditions for any steer and wait/final operation.
@@ -28,9 +28,9 @@ Design comparison:
 - Never add, remove, rename, reinterpret, complete, or repair a designer proposal. Do not read from or modify the target worktree.
 
 Round accounting and report:
-- After completion, read every dispatched thread's latest cumulative model token observation and native goal again. Compute that thread's round token delta from latest cumulative minus its pre-dispatch baseline; never sum multiple cumulative snapshots from the same thread.
-- Report the per-thread model token breakdown and authoritative total. `cachedInputTokens` is a subset of input, so never add it again to total; likewise do not double-count any nested/subset breakdown field.
-- Separately report each native goal's `status`, `tokensUsed`, optional `tokenBudget`, and `timeUsedSeconds`, plus the Coordinator-observed round wall elapsed. Goal-visible tokens and model token breakdowns are separate accounting surfaces and must not be mixed.
+- After completion, read every dispatched thread's native goal again. Required per-round accounting is each native goal's `status`, `tokensUsed`, optional `tokenBudget`, and `timeUsedSeconds`, plus the Coordinator-observed round wall elapsed.
+- A model token observation is optional. Report it only when that exact `crew wait` result contains `token_usage`, label it as cumulative and observed by that wait, and disclose when it is unavailable. Missing model usage never blocks comparison or the round. Never subtract an unobserved baseline, treat a missing baseline as zero, or fabricate a round model-token delta or total.
+- When an optional model breakdown is present, `cachedInputTokens` is a subset of input, so never add it again; likewise do not double-count any nested/subset breakdown field. Goal-visible tokens and model token observations are separate accounting surfaces and must not be mixed.
 - Summarize compliance/comparison state, recommendation, retries, and remaining blockers, then ask the required next-step question and wait.
 
 Output and language:

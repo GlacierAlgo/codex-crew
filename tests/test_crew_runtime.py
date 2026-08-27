@@ -301,6 +301,53 @@ class CrewRuntimeTests(unittest.TestCase):
         )
         self.assertEqual("authoritative final", repeated.data["final_text"])
 
+    def test_usage_after_completion_is_not_fabricated_by_wait_status_or_final(self) -> None:
+        baseline = crew_status(
+            ENDPOINT, thread_id=THREAD_ID, connection_factory=self.factory
+        )
+        active = self.state.active("turn-late-usage", "work")
+        completed = copy.deepcopy(active)
+        completed["status"] = "completed"
+        completed["items"].append(_final_item("done without observed usage"))
+        late_usage = {"total": {"inputTokens": 23, "outputTokens": 5}}
+        self.state.notifications = [
+            AppServerNotification(
+                "turn/completed",
+                {"threadId": THREAD_ID, "turn": completed},
+            ),
+            AppServerNotification(
+                "thread/tokenUsage/updated",
+                {
+                    "threadId": THREAD_ID,
+                    "turnId": "turn-late-usage",
+                    "tokenUsage": late_usage,
+                },
+            ),
+        ]
+
+        waited = crew_wait(
+            ENDPOINT,
+            thread_id=THREAD_ID,
+            turn_id="turn-late-usage",
+            timeout_seconds=1,
+            connection_factory=self.factory,
+        )
+        status = crew_status(
+            ENDPOINT, thread_id=THREAD_ID, connection_factory=self.factory
+        )
+        final = crew_final(
+            ENDPOINT,
+            thread_id=THREAD_ID,
+            turn_id="turn-late-usage",
+            connection_factory=self.factory,
+        )
+
+        self.assertIsNone(baseline.data["token_usage"])
+        self.assertIsNone(waited.data["token_usage"])
+        self.assertIsNone(status.data["token_usage"])
+        self.assertIsNone(final.data["token_usage"])
+        self.assertEqual("thread/tokenUsage/updated", self.state.notifications[0].method)
+
     def test_goal_commands_are_native_and_do_not_require_binding_state(self) -> None:
         set_result = crew_goal_set(
             ENDPOINT,

@@ -82,16 +82,19 @@ designer_6 -> THREAD_6
 
 用户只与 Coordinator pane/thread 交互。收到一轮 design request 后，Coordinator：
 
-1. 记录 round wall start；读取四个 target threads 的 status、latest cumulative token
-   baseline 与 native goal，并设置明确 goal。用户未给 token budget 时不得臆造。
+1. 记录 round wall start；读取四个 target threads 的 authoritative status 与 native goal，
+   并设置明确 goal。用户未给 token budget 时不得臆造。
 2. 通过 existing exact `crew send`/`wait`/`final` 把 byte-identical request 分发给四个
    designers；active turn 不重复 send，所有操作保留 exact `turn_id` precondition。
 3. 收齐四份 authoritative final `agentMessage`，机械计算 exact module/API counts 与 audit；
    mismatch proposal 标记 noncompliant，不补写或修复，只比较合规方案并 recommendation。
-4. 读取每个 thread latest cumulative observation，以 latest minus baseline 计算 round token
-   delta；报告 model breakdown 与 total，`cachedInputTokens` 作为 input subset 不重复相加。
-5. 独立报告 goal `status`、`tokensUsed`、可选 `tokenBudget`、`timeUsedSeconds`，以及
-   Coordinator-observed round wall elapsed；goal-visible tokens 与 model breakdown 不混加。
+4. 再读取每个 thread 的 native goal；必须报告 goal `status`、`tokensUsed`、可选
+   `tokenBudget`、`timeUsedSeconds`，以及 Coordinator-observed round wall elapsed。
+5. model token observation 是 optional：只在对应 exact `crew wait` 返回 `token_usage` 时
+   报告，并标为该 wait 实际观察到的 cumulative value；缺失不阻塞 comparison/round。
+   不得把未观察 baseline 当作 zero，也不得虚构 round delta 或 model total。若展示 optional
+   breakdown，`cachedInputTokens` 是 input subset，不重复相加；goal-visible tokens 与 model
+   observation 不混加。
 6. 汇总 comparison/acceptance state、retries、remaining blockers，并询问用户继续、补充/
    修正，还是结束并回收。未收到用户下一步前不得开启新一轮。
 

@@ -55,6 +55,16 @@ class LoopPackageTests(unittest.TestCase):
         self.assertEqual({"gpt-5.6-sol"}, {role.model for role in package.roles})
         self.assertEqual({"high"}, {role.reasoning_effort for role in package.roles})
         self.assertEqual({"fast"}, {role.service_tier for role in package.roles})
+        commander = package.roles[0].instructions_path.read_text(encoding="utf-8")
+        for requirement in (
+            "Required per-round accounting is native goal",
+            "A model token observation is optional",
+            "exact `crew wait` result",
+            "Missing model usage never blocks the round",
+            "Never subtract an unobserved baseline",
+            "`cachedInputTokens`",
+        ):
+            self.assertIn(requirement, commander)
 
     def test_service_tier_is_required_nonempty_role_authority(self) -> None:
         for label, service_tier_line in (
@@ -222,7 +232,11 @@ service_tier = "fast"
             "only user-facing communication role",
             "runtime control envelope",
             "byte-identical original design request",
-            "latest cumulative model token observation",
+            "Required per-round accounting is each native goal",
+            "A model token observation is optional",
+            "exact `crew wait` result",
+            "Missing model usage never blocks comparison or the round",
+            "Never subtract an unobserved baseline",
             "cachedInputTokens",
             "timeUsedSeconds",
             "round wall elapsed",
