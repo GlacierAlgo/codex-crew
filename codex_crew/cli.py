@@ -11,6 +11,11 @@ from typing import Any, Sequence
 
 import click
 
+from codex_crew.app_server import (
+    DEFAULT_APP_SERVER_ENDPOINT,
+    AppServerError,
+    check_app_server,
+)
 from codex_crew.hook import run_stop_hook
 from codex_crew.launcher import CrewLaunch, LaunchError, launch_crew
 from codex_crew.loop_package import (
@@ -21,6 +26,18 @@ from codex_crew.loop_package import (
     install_loop_package,
     load_loop_package,
 )
+from codex_crew.crew_runtime import (
+    CrewCommandResult,
+    CrewRuntimeError,
+    crew_final,
+    crew_goal_clear,
+    crew_goal_get,
+    crew_goal_set,
+    crew_send,
+    crew_status,
+    crew_steer,
+    crew_wait,
+)
 from codex_crew.storage import (
     aggregate_latest,
     default_database_path,
@@ -28,6 +45,7 @@ from codex_crew.storage import (
     latest_final,
     latest_snapshots,
 )
+from codex_crew.startup import StartupError, up_crew
 
 
 @dataclass(frozen=True)
@@ -60,7 +78,9 @@ def hook_group() -> None:
 @hook_group.command("stop", help="Read a Stop payload from stdin.")
 @click.pass_obj
 def hook_stop(context: CliContext) -> None:
-    code = run_stop_hook(database_path=context.database_path)
+    code = run_stop_hook(
+        database_path=context.database_path,
+    )
     if code:
         raise click.exceptions.Exit(code)
 
@@ -199,18 +219,279 @@ def loop_check(loop_id: str, codex_home: Path | None) -> None:
         )
 
 
+@cli.group("app-server", help="Check Codex App Server connectivity.")
+def app_server_group() -> None:
+    pass
+
+
+@app_server_group.command("check", help="Check a Unix app-server WebSocket endpoint.")
+@click.argument("endpoint", default=DEFAULT_APP_SERVER_ENDPOINT)
+def app_server_check(endpoint: str) -> None:
+    try:
+        result = check_app_server(endpoint)
+    except AppServerError as error:
+        raise click.ClickException(str(error)) from error
+    click.echo(
+        f"ready\tendpoint={result.endpoint}\tsocket={result.socket_path}"
+    )
+
+
+@cli.group("crew", help="Control one exact App Server native thread.")
+def crew_group() -> None:
+    pass
+
+
+def _native_thread_options(function):
+    function = click.option(
+        "--thread-id", required=True, help="Exact App Server native thread id."
+    )(function)
+    return click.option(
+        "--endpoint",
+        default=DEFAULT_APP_SERVER_ENDPOINT,
+        show_default=True,
+        help="App Server Unix WebSocket endpoint.",
+    )(function)
+
+
+@crew_group.command("status", help="Read authoritative native thread status.")
+@_native_thread_options
+@click.option("--json", "json_output", is_flag=True)
+def crew_status_command(
+    endpoint: str,
+    thread_id: str,
+    json_output: bool,
+) -> None:
+    try:
+        result = crew_status(endpoint, thread_id=thread_id)
+    except CrewRuntimeError as error:
+        raise click.ClickException(str(error)) from error
+    _emit_crew_result(result, json_output=json_output)
+
+
+def _message_options(function):
+    function = click.option(
+        "--message-file",
+        type=click.Path(path_type=Path, dir_okay=False),
+        help="Read the complete UTF-8 message from one file.",
+    )(function)
+    return click.option(
+        "--message",
+        help="Complete message text, or - to read the complete message from stdin.",
+    )(function)
+
+
+@crew_group.command("send", help="Start one user turn on a native thread.")
+@_native_thread_options
+@_message_options
+@click.option("--json", "json_output", is_flag=True)
+def crew_send_command(
+    endpoint: str,
+    thread_id: str,
+    message: str | None,
+    message_file: Path | None,
+    json_output: bool,
+) -> None:
+    text = _read_message(message, message_file)
+    try:
+        result = crew_send(
+            endpoint,
+            thread_id=thread_id,
+            message=text,
+        )
+    except CrewRuntimeError as error:
+        raise click.ClickException(str(error)) from error
+    _emit_crew_result(result, json_output=json_output)
+
+
+@crew_group.command("steer", help="Append input to one exact active native turn.")
+@_native_thread_options
+@click.option("--expected-turn-id", required=True)
+@_message_options
+@click.option("--json", "json_output", is_flag=True)
+def crew_steer_command(
+    endpoint: str,
+    thread_id: str,
+    expected_turn_id: str,
+    message: str | None,
+    message_file: Path | None,
+    json_output: bool,
+) -> None:
+    text = _read_message(message, message_file)
+    try:
+        result = crew_steer(
+            endpoint,
+            thread_id=thread_id,
+            expected_turn_id=expected_turn_id,
+            message=text,
+        )
+    except CrewRuntimeError as error:
+        raise click.ClickException(str(error)) from error
+    _emit_crew_result(result, json_output=json_output)
+
+
+@crew_group.command("wait", help="Wait for one exact native turn to finish.")
+@_native_thread_options
+@click.option("--turn-id", required=True)
+@click.option(
+    "--timeout",
+    "timeout_seconds",
+    type=click.FloatRange(min=0.001),
+    required=True,
+)
+@click.option("--json", "json_output", is_flag=True)
+def crew_wait_command(
+    endpoint: str,
+    thread_id: str,
+    turn_id: str,
+    timeout_seconds: float,
+    json_output: bool,
+) -> None:
+    try:
+        result = crew_wait(
+            endpoint,
+            thread_id=thread_id,
+            turn_id=turn_id,
+            timeout_seconds=timeout_seconds,
+        )
+    except CrewRuntimeError as error:
+        raise click.ClickException(str(error)) from error
+    _emit_crew_result(result, json_output=json_output)
+
+
+@crew_group.command("final", help="Read one authoritative native final item.")
+@_native_thread_options
+@click.option("--turn-id")
+@click.option("--json", "json_output", is_flag=True)
+def crew_final_command(
+    endpoint: str,
+    thread_id: str,
+    turn_id: str | None,
+    json_output: bool,
+) -> None:
+    try:
+        result = crew_final(
+            endpoint,
+            thread_id=thread_id,
+            turn_id=turn_id,
+        )
+    except CrewRuntimeError as error:
+        raise click.ClickException(str(error)) from error
+    _emit_crew_result(result, json_output=json_output)
+
+
+@crew_group.group("goal", help="Manage the app-server-native thread goal.")
+def crew_goal_group() -> None:
+    pass
+
+
+@crew_goal_group.command("get", help="Read the native thread goal.")
+@_native_thread_options
+@click.option("--json", "json_output", is_flag=True)
+def crew_goal_get_command(
+    endpoint: str, thread_id: str, json_output: bool
+) -> None:
+    try:
+        result = crew_goal_get(endpoint, thread_id=thread_id)
+    except CrewRuntimeError as error:
+        raise click.ClickException(str(error)) from error
+    _emit_crew_result(result, json_output=json_output)
+
+
+@crew_goal_group.command("set", help="Set an active native thread goal.")
+@_native_thread_options
+@click.option("--objective", required=True)
+@click.option("--token-budget", type=click.IntRange(min=1))
+@click.option("--json", "json_output", is_flag=True)
+def crew_goal_set_command(
+    endpoint: str,
+    thread_id: str,
+    objective: str,
+    token_budget: int | None,
+    json_output: bool,
+) -> None:
+    try:
+        result = crew_goal_set(
+            endpoint,
+            thread_id=thread_id,
+            objective=objective,
+            token_budget=token_budget,
+        )
+    except CrewRuntimeError as error:
+        raise click.ClickException(str(error)) from error
+    _emit_crew_result(result, json_output=json_output)
+
+
+@crew_goal_group.command("clear", help="Clear the native thread goal.")
+@_native_thread_options
+@click.option("--json", "json_output", is_flag=True)
+def crew_goal_clear_command(
+    endpoint: str, thread_id: str, json_output: bool
+) -> None:
+    try:
+        result = crew_goal_clear(endpoint, thread_id=thread_id)
+    except CrewRuntimeError as error:
+        raise click.ClickException(str(error)) from error
+    _emit_crew_result(result, json_output=json_output)
+
+
+@cli.command("up", help="Prepare and launch a repository-owned Codex crew.")
+@click.argument(
+    "project_dir",
+    required=False,
+    default=".",
+    type=click.Path(path_type=Path, file_okay=False),
+)
+@click.option("--loop", "loop_id", default=DEFAULT_LOOP_ID, show_default=True)
+@click.option("--session", default="default", show_default=True)
+@click.option("--window-name", help="tmux window name (default: crew-<project>).")
+@click.option("--json", "json_output", is_flag=True)
+def up(
+    project_dir: Path,
+    loop_id: str,
+    session: str,
+    window_name: str | None,
+    json_output: bool,
+) -> None:
+    """Run profile, tmux, App Server, and native launch gates in order."""
+
+    try:
+        result = up_crew(
+            project_dir,
+            loop_id=loop_id,
+            session=session,
+            window_name=window_name,
+        )
+    except StartupError as error:
+        raise click.ClickException(str(error)) from error
+    if json_output:
+        click.echo(json.dumps(result.as_dict(), ensure_ascii=False, indent=2))
+    else:
+        _print_launch(result)
+
+
 @cli.command("launch", help="Launch a manifest-defined Codex loop in one tmux window.")
 @click.argument(
     "project_dir",
     type=click.Path(path_type=Path, file_okay=False),
 )
 @click.option("--loop", "loop_id", default=DEFAULT_LOOP_ID, show_default=True)
-@click.option("--session", default="default", show_default=True, help="Existing tmux session.")
+@click.option(
+    "--app-server",
+    "app_server_endpoint",
+    metavar="ENDPOINT",
+    default=DEFAULT_APP_SERVER_ENDPOINT,
+    show_default=True,
+    help="App Server endpoint used by every launched TUI (unix:// or unix://PATH).",
+)
+@click.option(
+    "--session", default="default", show_default=True, help="Existing tmux session."
+)
 @click.option("--window-name", help="tmux window name (default: crew-<project>).")
 @click.option("--json", "json_output", is_flag=True)
 def launch(
     project_dir: Path,
     loop_id: str,
+    app_server_endpoint: str,
     session: str,
     window_name: str | None,
     json_output: bool,
@@ -219,6 +500,7 @@ def launch(
         result = launch_crew(
             project_dir,
             loop_id=loop_id,
+            app_server_endpoint=app_server_endpoint,
             session=session,
             window_name=window_name,
         )
@@ -272,15 +554,51 @@ def _print_latest(rows: list[dict[str, Any]]) -> None:
 
 def _print_launch(result: CrewLaunch) -> None:
     click.echo(f"loop: {result.loop_id} ({result.layout})")
+    click.echo(f"app-server: {result.app_server_endpoint}")
     click.echo(f"window: {result.session}:{result.window_index} ({result.window_name})")
     click.echo(f"project: {result.project_dir}")
     for pane in result.panes:
-        click.echo(
+        detail = (
             f"{pane.role}: {pane.pane_id} "
             f"(profile={pane.runtime_profile}, model={pane.model}, "
             f"reasoning_effort={pane.reasoning_effort})"
         )
+        detail += (
+            f" thread={pane.thread_id} "
+            f"bootstrap_turn={pane.bootstrap_turn_id}"
+        )
+        click.echo(detail)
     click.echo(f"open: tmux select-window -t {result.session}:{result.window_index}")
+
+
+def _read_message(message: str | None, message_file: Path | None) -> str:
+    if (message is None) == (message_file is None):
+        raise click.UsageError("provide exactly one of --message-file or --message")
+    if message_file is not None:
+        try:
+            return message_file.read_text(encoding="utf-8", errors="strict")
+        except (OSError, UnicodeError) as error:
+            raise click.ClickException(
+                f"could not read UTF-8 message file {message_file}: {error}"
+            ) from error
+    if message == "-":
+        return click.get_text_stream("stdin").read()
+    return message or ""
+
+
+def _emit_crew_result(result: CrewCommandResult, *, json_output: bool) -> None:
+    if json_output:
+        click.echo(json.dumps(result.as_dict(), ensure_ascii=False, indent=2))
+        return
+    turn = result.turn_id or "null"
+    click.echo(
+        f"{result.command}\tendpoint={result.endpoint}\t"
+        f"thread_id={result.thread_id}\tturn_id={turn}\tstatus={result.status}"
+    )
+    if result.command == "final" and isinstance(result.data.get("final_text"), str):
+        click.echo(result.data["final_text"])
+    if result.command.startswith("goal."):
+        click.echo(json.dumps(result.data.get("goal"), ensure_ascii=False))
 
 
 def _hook_config(database_path: Path) -> dict[str, Any]:

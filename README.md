@@ -1,224 +1,236 @@
 # codex-crew
 
-`codex-crew` 从 repository-owned loop package 在 tmux 中启动多个独立 Codex
-session，并使用 Codex `Stop` Hook，在每个 turn 停止时把完整 final、累计 token
-分项和可选 goal 快照写入本地 SQLite。
+`codex-crew` 在一个 tmux window 中启动 Commander、Worker、Judger 三个独立
+Codex TUI。tmux 只提供三列等宽的可视布局；所有派发、等待、final 与 goal 操作都
+直接使用 App Server native `thread_id`。
 
-运行依赖 Python 3.11+、[uv](https://docs.astral.sh/uv/) 与 Click。真实 launch 还需要
-`codex` CLI、一个已存在的 tmux session，以及 target project root 中供 black-box
-Judger 阅读的 `README.md`。不需要 Redis 或常驻服务。
+## One-click startup
 
-## Operator-only clean-clone quickstart
-
-本节以及后续 profile materialization、symlink 和 Stop Hook setup procedure 仅供
-人类/operator 在 Commander、Worker、Judger session 启动前执行。运行中的 AI loop
-不负责也不得执行 `uv sync`、`codex-crew loop install` 或
-`codex-crew loop check`，不得 materialize profiles、建立或修改 runtime symlink、
-配置 Hook，亦不得修改自身 runtime setup。
-
-在 clean clone 根目录安装 locked environment：
+要求 Python 3.11+、`uv`、`tmux` 与已完成登录的 `codex`。在本 repository root 一次启动：
 
 ```bash
-uv sync
-uv run codex-crew --help
+./bin/codex-crew up /path/to/project --json
 ```
 
-列出并验证 repository 中的 loop packages：
+`PROJECT_DIR` 省略时默认为当前目录；`--session` 默认是 `default`。`up` 在一次调用内
+严格依次完成：
 
-```bash
-uv run codex-crew loop list
-```
+1. 从 `loops/three-agent-dev/manifest.toml` 加载唯一 runtime authority；
+2. 幂等生成并检查三个 repo-derived profile adapter；
+3. 复用 exact tmux session，只有不存在时才运行
+   `tmux new-session -d -s SESSION -c PROJECT_DIR`；
+4. 复用 ready 的 repo-owned App Server，否则 detached 启动并有界等待 readiness；
+5. 调用 native launcher，创建一个 window、三列等宽 pane，并等待三个 identity
+   bootstrap turn COMMIT。
 
-当前输出为：
+任一 gate 失败都会非零退出，后续 gate 不会执行，也不会返回 partial launch JSON。
+`up` 不会杀已有 tmux session/window，也不会为失败的 App Server readiness 杀未知 live
+PID。
+
+成功结果包含：
+
+- `window_id`、`window_index` 与 `pane_mapping`，只用于打开和查看布局；
+- `thread_mapping`，把 `commander`、`worker`、`judger` 映射到精确 native
+  `thread_id`；
+- 每个 pane 已 COMMIT 的 `bootstrap_turn_id` 与 marker；
+- 三个 TUI 共用的 explicit repo Unix endpoint。
+
+## Repository and runtime boundary
+
+Canonical launcher、startup lifecycle、manifest、role instructions 与 profile generator 全部
+位于 tracked repository：`bin/`、`codex_crew/`、`loops/`。运行时只产生以下 ignored
+内容：
 
 ```text
-three-agent-dev	roles=commander,worker,judger	layout=even-horizontal
+<codex-crew-repo>/.codex-crew/generated/<loop-id>/*.config.toml
+<codex-crew-repo>/.codex-crew/runtime/app-server.sock
+<codex-crew-repo>/.codex-crew/runtime/app-server.pid
+<codex-crew-repo>/.codex-crew/runtime/app-server.log
 ```
 
-`loops/<loop-id>/manifest.toml` 是唯一 runtime authority，声明 ordered roles、每个
-role 的 package-local Markdown、namespaced runtime profile、model、reasoning
-effort 和 tmux layout。Repository Markdown + manifest 是唯一 editable source。
+`.gitignore` 覆盖整个 `.codex-crew/`。`$CODEX_HOME` 继续拥有 Codex auth；`up` 不复制、
+移动或读取 auth，只在 `$CODEX_HOME` 放置指向上述 generated adapter 的 namespaced
+symlink。
 
-安装并检查默认 loop：
+App Server lifecycle 只清理由 exact repo runtime path 和 dead PID 共同证明的 stale PID/
+Unix socket。endpoint 不 ready 且 PID 仍 live、PID file 无效、socket 没有 owned PID，或
+runtime artifact 类型冲突时一律 fail closed，并在错误中给出 endpoint、PID/log path 等
+诊断位置。
+
+## Runtime model
+
+- 三个 TUI 都以各自的 `--profile`、`--strict-config`、`--yolo`、`--remote`、
+  `-C TARGET` 和唯一 bootstrap prompt 启动，不预创建 thread，也不执行
+  `codex resume`。
+- launcher 通过 App Server `thread/list` 与 `thread/read`，覆盖 `cli`、`vscode` 两种
+  interactive source，按启动前后 thread 集合、唯一 marker、role 和 exact `cwd` 做
+  有界关联；不维护 binding database。
+- 只有 bootstrap turn 已 `completed`，且 authoritative `final_answer`
+  `agentMessage` 第一行严格为对应的 `role=<role>`，native identity 才 COMMIT。
+- launch 返回的 native `thread_id` 是后续控制身份。`codex://THREAD_ID` 只可作为
+  Codex App 的导航 projection，不是 CLI 或 wire address。
+- tmux 不承载 role message、completion state 或 controller metadata。禁止通过
+  `send-keys`、paste buffer、`capture-pane`、prompt 外观或沉默判断结果。
+
+## Low-level diagnostics
+
+`launch` 与 `app-server check` 保留用于显式 external endpoint 或逐层诊断，不是默认
+startup procedure。例如：
 
 ```bash
-uv run codex-crew loop install three-agent-dev
-uv run codex-crew loop check three-agent-dev
+./bin/codex-crew loop install three-agent-dev
+./bin/codex-crew loop check three-agent-dev
+tmux new-session -d -s diagnostic -c /path/to/project
+codex app-server --listen unix:///tmp/codex-crew-diagnostic.sock
+./bin/codex-crew app-server check unix:///tmp/codex-crew-diagnostic.sock
+./bin/codex-crew launch /path/to/project \
+  --session diagnostic \
+  --app-server unix:///tmp/codex-crew-diagnostic.sock \
+  --json
 ```
 
-两条命令也可省略默认 ID。install 把 deterministic derived TOML 写入当前 clone 的
-ignored `.codex-crew/generated/<loop-id>/`，并在 `$CODEX_HOME`（默认
-`~/.codex`）中建立 namespaced `*.config.toml` symlink；不会维护第二份可编辑 copy。
-install 可重复运行且输出稳定，check 会同时验证 source、adapter 内容与 symlink
-目标。
+低层 `launch` 假定 profile、tmux session 和 endpoint 已由 caller 准备，不接管它们的
+lifecycle。`app-server check` 只做连接和 protocol readiness 检查，不创建 thread。
 
-用临时 Codex home 做隔离验证时，可使用环境变量或 documented option：
+## Native launch contract
 
-```bash
-CREW_TMP=$(mktemp -d)
-CODEX_HOME="$CREW_TMP/codex-home" uv run codex-crew loop install
-uv run codex-crew loop check --codex-home "$CREW_TMP/codex-home"
-```
+Launch 没有 partial-success 状态。任一 role 在 deadline 内缺失，或 bootstrap
+`failed`、`interrupted`、缺少/wrong identity final 时，command 以非零状态退出；错误
+包含 exact tmux window ID 与 missing/failed role。已创建的可视 window会保留供诊断，
+launcher 不回退、不猜测 identity。
 
-install 在写任何文件前完成全部 preflight。若任一同名 `$CODEX_HOME` target 是
-regular file、指向其他位置的 symlink，或任一 generated target 不是
-`codex-crew` managed adapter，command 会非零退出并保留所有冲突内容，不会覆盖。
-修正或移走明确的冲突后再重试；不要手工编辑 generated adapter。
+生产默认 committed-identity deadline 为 120 秒：launch 最多等待 120 秒，让三个
+profiled xhigh identity turns 完成并满足 COMMIT gate。120 秒后仍未全部 COMMIT 才按
+上述规则非零退出；这不是单次 App Server request timeout。
 
-## 安装 Stop Hook
-
-初始化数据库并生成当前 checkout 对应的 Hook 配置：
-
-```bash
-uv run codex-crew init-db
-uv run codex-crew hook-config
-```
-
-将第二条命令输出的 `Stop` 配置合并到 `$CODEX_HOME/hooks.json`。本项目也提供了
-可直接参考的 [`examples/hooks.json`](examples/hooks.json)。Codex 启动后使用
-`/hooks` 检查并信任这条 Hook。
-
-默认数据库位于：
+启动命令的固定形态为：
 
 ```text
-~/.local/state/codex-crew/snapshots.sqlite3
+codex --profile PROFILE --strict-config --yolo \
+  --remote ENDPOINT -C TARGET UNIQUE_BOOTSTRAP_PROMPT
 ```
 
-可以用 `CODEX_CREW_DB` 或全局 `--db` 参数覆盖。
+## Native thread control
 
-## Launch
-
-确保 profile 已 install/check，且 tmux session `default` 已存在，然后启动 target：
+以下命令只需要 endpoint 与 launch 返回的 native `thread_id`，不读取 tmux 或
+SQLite：
 
 ```bash
-uv run codex-crew launch /path/to/project
+ENDPOINT=unix:///absolute/path/to/codex-crew/.codex-crew/runtime/app-server.sock
+WORKER_THREAD=01...
+
+uv run codex-crew crew status \
+  --endpoint "$ENDPOINT" --thread-id "$WORKER_THREAD" --json
+
+uv run codex-crew crew send \
+  --endpoint "$ENDPOINT" --thread-id "$WORKER_THREAD" \
+  --message-file task.md --json
 ```
 
-`launch TARGET` 默认选择 `three-agent-dev`。显式 loop、session 或 window name：
+`send` 返回 exact `turn_id`。等待并读取 authoritative final：
 
 ```bash
-uv run codex-crew launch /path/to/project \
-  --loop three-agent-dev \
-  --session research \
-  --window-name crew-factor
+TURN_ID=01...
+
+uv run codex-crew crew wait \
+  --endpoint "$ENDPOINT" --thread-id "$WORKER_THREAD" \
+  --turn-id "$TURN_ID" --timeout 120 --json
+
+uv run codex-crew crew final \
+  --endpoint "$ENDPOINT" --thread-id "$WORKER_THREAD" \
+  --turn-id "$TURN_ID" --json
 ```
 
-launcher 从 manifest 读取 ordered roles、runtime profiles、model、reasoning effort
-和 `even-horizontal` layout。当前 package 形成 Commander、Worker、Judger 从左到右
-三列等宽 pane，每个 pane 通过 `-C` 使用同一个 target root。`--json` 输出
-`loop_id`、`layout`、ordered `panes` 和稳定 `pane_mapping`。
-
-window 保存 `@codex_crew_loop`、`@codex_crew_project` 和按 manifest 派生的
-`@codex_<role>_pane`；pane 保存 `@codex_role`。创建或记录 mapping 任一步失败时，
-只回滚本次 `new-window` 返回的精确 `window_id`，不修改已有 window。
-
-## 无 side effect 的 public launch probe
-
-`launch` 只从 `PATH` 解析 `codex` 和 `tmux`。下面的 public fake-executable
-boundary 可供 black-box 验证：它执行真实 CLI/manifest/profile preflight 和 mapping
-逻辑，但 fake `tmux` 不创建 session/window，fake `codex` 不启动 TUI。
+若 status 显示已有 active turn，不能再次 `send`。只有给出 exact active turn
+precondition 才能 steer：
 
 ```bash
-CREW_TMP=$(mktemp -d)
-mkdir -p "$CREW_TMP/fake-bin"
-
-cat >"$CREW_TMP/fake-bin/codex" <<'SH'
-#!/bin/sh
-printf '%s\n' 'codex fake 1.0'
-SH
-
-cat >"$CREW_TMP/fake-bin/tmux" <<'SH'
-#!/bin/sh
-operation=$1
-shift
-case "$operation" in
-  has-session|select-layout|set-option|kill-window)
-    exit 0
-    ;;
-  new-window)
-    printf '@fake-window\t%%fake-commander\t1\n'
-    ;;
-  split-window)
-    target=
-    while [ "$#" -gt 0 ]; do
-      if [ "$1" = "-t" ]; then
-        shift
-        target=$1
-        break
-      fi
-      shift
-    done
-    case "$target" in
-      %fake-commander) printf '%%fake-worker\n' ;;
-      %fake-worker) printf '%%fake-judger\n' ;;
-      *) printf 'unexpected split target: %s\n' "$target" >&2; exit 64 ;;
-    esac
-    ;;
-  *)
-    printf 'unexpected tmux operation: %s\n' "$operation" >&2
-    exit 64
-    ;;
-esac
-SH
-
-chmod +x "$CREW_TMP/fake-bin/codex" "$CREW_TMP/fake-bin/tmux"
-CODEX_HOME="$CREW_TMP/codex-home" uv run codex-crew loop install
-CODEX_HOME="$CREW_TMP/codex-home" uv run codex-crew loop check
-PATH="$CREW_TMP/fake-bin:$PATH" \
-  CODEX_HOME="$CREW_TMP/codex-home" \
-  uv run codex-crew launch "$PWD" --loop three-agent-dev --json
+uv run codex-crew crew steer \
+  --endpoint "$ENDPOINT" --thread-id "$WORKER_THREAD" \
+  --expected-turn-id "$TURN_ID" --message '补充完整输入' --json
 ```
 
-成功 probe 退出 0，JSON 的 `pane_mapping` 为
-`commander=%fake-commander`、`worker=%fake-worker`、`judger=%fake-judger`。
-将 `--loop` 改为未知 ID 会在调用 fake executables 前非零退出。
-
-## 查询与 completion contract
+Goal 同样直接属于 native thread：
 
 ```bash
-# 最近 Stop 快照，不输出可能很长的 final
-uv run codex-crew latest
-
-# 包含完整字段和 final 的 JSON
-uv run codex-crew latest --json
-
-# 某个 session/turn 的完整 final
-uv run codex-crew final --session-id SESSION_ID --turn-id TURN_ID
-
-# 每个 session 只取最新累计快照后再汇总
-uv run codex-crew summary
+uv run codex-crew crew goal get \
+  --endpoint "$ENDPOINT" --thread-id "$WORKER_THREAD" --json
+uv run codex-crew crew goal set \
+  --endpoint "$ENDPOINT" --thread-id "$WORKER_THREAD" \
+  --objective '完成当前 slice' --token-budget 40000 --json
+uv run codex-crew crew goal clear \
+  --endpoint "$ENDPOINT" --thread-id "$WORKER_THREAD" --json
 ```
 
-成功写库后，Hook 设置当前 pane 的 user options：
+Runtime invariants：
 
-- `@codex_status=complete`
-- `@codex_session_id`
-- `@codex_turn_id`
-- `@codex_snapshot_at`
-- `@codex_crew_db`
+- `send` 在 `turn/start` 前读取 authoritative turns；对 `-32001` 只做有界 retry。
+- 若 `turn/start` response 丢失，仅用启动前 turn 集合与 exact user text 关联新增
+  turn；不能唯一证明时返回 `dispatch_unknown`，不重复派发。
+- `steer` 必须匹配唯一 authoritative active `turn_id`。
+- `wait` 先 read；active 时只用 bare `thread/resume {threadId}` 为当前 controller
+  connection 订阅 native events，再 read 一次关闭 completion-before-subscribe race。
+- `turn/completed` 和 final `agentMessage` item 是 completion/final authority；没有
+  shared Stop snapshot fallback。
 
-例如：
+## Commander–Worker–Judger loop
+
+角色固定为 Commander、Worker、Judger：
+
+- Commander 保持 source-read-only，按 `thread_mapping` 派发一个 bounded Worker
+  slice，并用 exact turn wait/final 读取结果。
+- Worker 是唯一可修改 shared worktree 的角色，运行最小相关验证并按固定 contract
+  回报。
+- Judger 保持 source-read-only，只读取本 README，通过这里记录的 public commands
+  做 black-box acceptance；它不读取 source、diff、tests 或内部 state。
+
+Worker final：
+
+```text
+Result: complete | blocked
+Changed: paths and behavior
+Verification: command and result
+Risks: remaining uncertainty
+```
+
+Judger final：
+
+```text
+Verdict: PASS | FAIL
+Blockers: reproducible user-visible failures, or none
+Checks: public commands/interactions executed and observed outcomes
+Evidence: exit status, stdout/stderr, responses/UI behavior, and public artifacts
+```
+
+Commander 只有在独立 Judger 返回 `PASS` 后才接受 slice。
+
+## Independent Stop snapshots
+
+Stop Hook SQLite 是独立的 direct observation feature，不参与 crew target resolution、
+dispatch、wait 或 final。它保留以下命令：
 
 ```bash
-tmux show-options -pv -t %3 @codex_status
-tmux show-options -pv -t %3 @codex_session_id
+uv run codex-crew --db /path/snapshots.sqlite3 init-db
+uv run codex-crew --db /path/snapshots.sqlite3 hook-config
+uv run codex-crew --db /path/snapshots.sqlite3 latest --json
+uv run codex-crew --db /path/snapshots.sqlite3 final --session-id SESSION --turn-id TURN
+uv run codex-crew --db /path/snapshots.sqlite3 summary --json
 ```
 
-## 统计与可靠性边界
+Hook 只写 `turn_stop_snapshot`，不查询或修改 tmux，也不保存 crew binding。
 
-- token 列是该 session 截至 Stop 时刻的累计值，不是单 turn 增量。
-- `summary` 对每个 session 只取最新行；单 turn 用量应用相邻快照做差。
-- `cached_input_tokens` 是 `input_tokens` 的分项。
-- `reasoning_output_tokens` 是 `output_tokens` 的分项，不能重复相加。
-- `goal_tokens_used` 与模型 usage 是两个独立口径。
-- Goal objective 不超过 40 个 Unicode 字符时原样保存；超过时保存前 20 个字符、
-  `...` 和最后 20 个字符。
+## Focused verification
 
-官方 Hook 输入不直接携带 token usage 和 goal，当前实现从 `transcript_path` 的
-JSONL 做兼容性解析。transcript 格式不是稳定 Hook API，因此解析失败时对应字段写
-`NULL`，Hook 自身始终返回成功，不会阻止 Codex 完成 turn。
+```bash
+uv run python -m unittest tests.test_startup tests.test_cli
+uv run python -m unittest tests.test_launcher
+```
 
-完整 final 可能包含敏感信息。默认数据库文件权限收紧为仅当前用户可读写；备份、
-同步或上传前仍应自行检查内容。更完整的字段与设计约束见
-[`DESIGN.md`](DESIGN.md)。三 Agent 协作遵循 [`loops/index.md`](loops/index.md)
-routing，并读取 [`loops/three-agent-dev/loop.md`](loops/three-agent-dev/loop.md)。
+静态 migration guard：
+
+```bash
+rg -n 'binding.*window|run_tmux_' codex_crew
+rg -n 'send-keys|paste-buffer|load-buffer|capture-pane|set-option' codex_crew
+```
+
+两条命令都应无匹配。

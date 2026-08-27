@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
-import subprocess
 import sys
 import time
 from typing import Any, IO, Mapping
@@ -22,7 +20,9 @@ def capture_stop(
 ) -> StopSnapshot:
     session_id = _required_string(payload, "session_id")
     turn_id = _required_string(payload, "turn_id")
-    transcript = read_transcript_snapshot(_optional_string(payload.get("transcript_path")))
+    transcript = read_transcript_snapshot(
+        _optional_string(payload.get("transcript_path"))
+    )
     usage = transcript.usage
     goal = transcript.goal
 
@@ -44,9 +44,12 @@ def capture_stop(
         goal_tokens_used=goal.tokens_used if goal else None,
         goal_time_used_seconds=goal.time_used_seconds if goal else None,
     )
-    resolved_database = Path(database_path).expanduser() if database_path else default_database_path()
+    resolved_database = (
+        Path(database_path).expanduser()
+        if database_path
+        else default_database_path()
+    )
     upsert_snapshot(record, resolved_database)
-    _update_tmux_options(record, resolved_database)
     return record
 
 
@@ -66,46 +69,10 @@ def run_stop_hook(
         capture_stop(payload, database_path=database_path)
     except Exception as error:  # The hook contract must not break Codex completion.
         print(f"codex-crew: failed to capture Stop snapshot: {error}", file=stderr)
-        _set_tmux_status("capture_error")
 
     json.dump({}, stdout, separators=(",", ":"))
     stdout.write("\n")
     return 0
-
-
-def _update_tmux_options(record: StopSnapshot, database_path: Path) -> None:
-    pane = os.environ.get("TMUX_PANE")
-    if not pane:
-        return
-    values = {
-        "@codex_status": "complete",
-        "@codex_session_id": record.session_id,
-        "@codex_turn_id": record.turn_id,
-        "@codex_snapshot_at": str(record.asof_at),
-        "@codex_crew_db": str(database_path),
-    }
-    for key, value in values.items():
-        _tmux_set(pane, key, value)
-
-
-def _set_tmux_status(status: str) -> None:
-    pane = os.environ.get("TMUX_PANE")
-    if pane:
-        _tmux_set(pane, "@codex_status", status)
-
-
-def _tmux_set(pane: str, key: str, value: str) -> None:
-    try:
-        subprocess.run(
-            ["tmux", "set-option", "-p", "-t", pane, key, value],
-            check=False,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=1,
-        )
-    except (OSError, subprocess.SubprocessError):
-        pass
 
 
 def _required_string(payload: Mapping[str, Any], key: str) -> str:

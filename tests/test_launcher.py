@@ -6,7 +6,15 @@ import subprocess
 import tempfile
 import unittest
 
-from codex_crew.launcher import LaunchError, launch_crew
+from codex_crew.app_server import AppServerError
+from codex_crew.launcher import (
+    DEFAULT_DISCOVERY_TIMEOUT_SECONDS,
+    LaunchError,
+    launch_crew,
+)
+
+
+ENDPOINT = "unix:///tmp/native.sock"
 
 
 def _completed(
@@ -19,171 +27,322 @@ def _completed(
     return subprocess.CompletedProcess(command, returncode, stdout, stderr)
 
 
+class DiscoveryState:
+    def __init__(self, outcomes: dict[str, str] | None = None) -> None:
+        self.outcomes = outcomes or {}
+        self.threads: dict[str, dict] = {
+            "existing-thread": {
+                "id": "existing-thread",
+                "source_kind": "cli",
+                "status": {"type": "idle"},
+                "turns": [],
+            }
+        }
+        self.list_params: list[dict] = []
+
+    def add_from_command(self, startup: str) -> None:
+        arguments = shlex.split(startup)
+        prompt = arguments[-1]
+        role_line = next(
+            line for line in prompt.splitlines() if line.startswith("role=")
+        )
+        role = role_line.removeprefix("role=")
+        marker = next(
+            line
+            for line in prompt.splitlines()
+            if line.startswith("CODEX_CREW_BOOTSTRAP:")
+        )
+        outcome = self.outcomes.get(role, "completed")
+        items = [
+            {
+                "type": "userMessage",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": f"{marker}\n{role_line}\nbootstrap",
+                    }
+                ],
+            }
+        ]
+        if outcome == "completed":
+            items.append(
+                {
+                    "type": "agentMessage",
+                    "phase": "final_answer",
+                    "text": f"role={role}\n职责确认。",
+                }
+            )
+        elif outcome == "wrong":
+            items.append(
+                {
+                    "type": "agentMessage",
+                    "phase": "final_answer",
+                    "text": "role=wrong\n职责错误。",
+                }
+            )
+        elif outcome not in {"missing", "failed", "interrupted", "inProgress"}:
+            raise AssertionError(f"unknown bootstrap outcome {outcome!r}")
+        status = "completed" if outcome in {"completed", "wrong", "missing"} else outcome
+        thread_id = f"thread-{role}"
+        self.threads[thread_id] = {
+            "id": thread_id,
+            # Live remote TUI evidence reports vscode for these threads.
+            "source_kind": "vscode",
+            "status": {
+                "type": "active" if status == "inProgress" else "idle"
+            },
+            "turns": [
+                {
+                    "id": f"turn-{role}",
+                    "status": status,
+                    "items": items,
+                }
+            ],
+        }
+
+
+class FakeConnection:
+    def __init__(self, state: DiscoveryState, endpoint: str) -> None:
+        if endpoint != ENDPOINT:
+            raise AppServerError("wrong endpoint")
+        self.state = state
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args) -> None:
+        return None
+
+    def request(self, method: str, params: dict | None = None):
+        if method == "thread/list":
+            assert params is not None
+            self.state.list_params.append(dict(params))
+            source_kinds = set(params.get("sourceKinds", []))
+            return {
+                "data": [
+                    {"id": thread_id}
+                    for thread_id, thread in reversed(tuple(self.state.threads.items()))
+                    if thread["source_kind"] in source_kinds
+                ],
+                "nextCursor": None,
+            }
+        if method == "thread/read":
+            assert params is not None
+            thread = dict(self.state.threads[params["threadId"]])
+            thread.pop("source_kind")
+            return {"thread": thread}
+        raise AssertionError((method, params))
+
+
 class FakeRunner:
-    def __init__(self, *, fail_first_split: bool = False) -> None:
+    def __init__(
+        self, state: DiscoveryState, *, fail_first_split: bool = False
+    ) -> None:
+        self.state = state
         self.calls: list[tuple[str, ...]] = []
         self.fail_first_split = fail_first_split
         self.horizontal_splits = 0
 
     def __call__(self, command) -> subprocess.CompletedProcess[str]:
-        call = tuple(command)
-        self.calls.append(call)
-        if call[0] == "/codex":
-            return _completed(call, stdout="codex-cli test\n")
-        operation = call[1]
+        command = tuple(command)
+        self.calls.append(command)
+        if command[0] == "/codex":
+            return _completed(command, stdout="codex-cli test\n")
+        operation = command[1]
         if operation == "has-session":
-            return _completed(call)
+            return _completed(command)
         if operation == "new-window":
-            return _completed(call, stdout="@7\t%10\t6\n")
-        if operation == "split-window" and "-h" in call:
+            self.state.add_from_command(command[-1])
+            return _completed(command, stdout="@7\t%10\t6\n")
+        if operation == "split-window":
             self.horizontal_splits += 1
             if self.fail_first_split and self.horizontal_splits == 1:
-                return _completed(call, returncode=1, stderr="no space")
-            pane_id = f"%{10 + self.horizontal_splits}"
-            return _completed(call, stdout=f"{pane_id}\n")
-        if operation in {"select-layout", "set-option", "kill-window"}:
-            return _completed(call)
-        raise AssertionError(f"unexpected command: {call}")
+                return _completed(command, returncode=1, stderr="no space")
+            self.state.add_from_command(command[-1])
+            return _completed(command, stdout=f"%{10 + self.horizontal_splits}\n")
+        if operation in {"select-layout", "kill-window"}:
+            return _completed(command)
+        raise AssertionError(f"unexpected command: {command}")
+
+
+class Clock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
 
 
 class LauncherTests(unittest.TestCase):
-    def test_launch_uses_manifest_policy_and_records_stable_mapping(self) -> None:
-        runner = FakeRunner()
+    def test_launch_requires_committed_identity_and_covers_interactive_sources(self) -> None:
+        state = DiscoveryState()
+        runner = FakeRunner(state)
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory)
             (project / "README.md").write_text("# Product\n", encoding="utf-8")
-
             result = launch_crew(
                 project,
+                app_server_endpoint=ENDPOINT,
                 tmux_executable="/tmux",
                 codex_executable="/codex",
                 runner=runner,
+                connection_factory=lambda endpoint: FakeConnection(state, endpoint),
+                marker_factory=lambda: "launch-one",
             )
 
-        self.assertEqual("three-agent-dev", result.loop_id)
         self.assertEqual("even-horizontal", result.layout)
         self.assertEqual(
-            {"commander": "%10", "worker": "%11", "judger": "%12"},
-            result.pane_mapping,
+            {
+                "commander": "thread-commander",
+                "worker": "thread-worker",
+                "judger": "thread-judger",
+            },
+            result.thread_mapping,
         )
-        self.assertEqual(
-            [
-                "codex-crew-three-agent-dev-commander",
-                "codex-crew-three-agent-dev-worker",
-                "codex-crew-three-agent-dev-judger",
-            ],
-            [pane.runtime_profile for pane in result.panes],
-        )
-        self.assertEqual({"gpt-5.6-sol"}, {pane.model for pane in result.panes})
-        self.assertEqual({"xhigh"}, {pane.reasoning_effort for pane in result.panes})
+        self.assertNotIn("discovery_complete", result.as_dict())
+        self.assertNotIn("discovery_error", result.as_dict())
+        self.assertTrue(state.list_params)
+        for params in state.list_params:
+            self.assertEqual({"cli", "vscode"}, set(params["sourceKinds"]))
+            self.assertEqual(result.project_dir, params["cwd"])
 
-        new_window = next(call for call in runner.calls if call[1] == "new-window")
-        horizontal_splits = [
-            call
-            for call in runner.calls
-            if call[1] == "split-window" and "-h" in call
+        startup_commands = [
+            command[-1]
+            for command in runner.calls
+            if command[1] in {"new-window", "split-window"}
         ]
-        self.assertEqual(2, len(horizontal_splits))
-        worker_split, judger_split = horizontal_splits
-        self.assertEqual("=default:", new_window[new_window.index("-t") + 1])
-        self.assertEqual("%10", worker_split[worker_split.index("-t") + 1])
-        self.assertEqual("%11", judger_split[judger_split.index("-t") + 1])
-        self.assertNotIn("-v", judger_split)
+        self.assertEqual(3, len(startup_commands))
+        for startup, pane in zip(startup_commands, result.panes, strict=True):
+            arguments = shlex.split(startup)
+            self.assertEqual("/codex", arguments[0])
+            self.assertEqual(pane.runtime_profile, arguments[2])
+            self.assertIn("--strict-config", arguments)
+            self.assertIn("--yolo", arguments)
+            self.assertEqual(ENDPOINT, arguments[arguments.index("--remote") + 1])
+            self.assertEqual(result.project_dir, arguments[arguments.index("-C") + 1])
+            self.assertIn(pane.bootstrap_marker, arguments[-1].splitlines())
+            self.assertIn(f"role={pane.role}", arguments[-1].splitlines())
+            self.assertNotIn("resume", arguments)
+            turn = state.threads[pane.thread_id]["turns"][0]
+            self.assertEqual("completed", turn["status"])
+            self.assertEqual(
+                f"role={pane.role}", turn["items"][-1]["text"].splitlines()[0]
+            )
+
         self.assertIn(
             ("/tmux", "select-layout", "-t", "@7", "even-horizontal"),
             runner.calls,
         )
-        self.assertEqual(
-            shlex.join(
-                [
-                    "/codex",
-                    "--profile",
-                    "codex-crew-three-agent-dev-commander",
-                    "--strict-config",
-                    "-C",
-                    result.project_dir,
-                ]
-            ),
-            new_window[-1],
-        )
-        self.assertIn(
-            (
-                "/tmux",
-                "set-option",
-                "-w",
-                "-t",
-                "@7",
-                "@codex_worker_pane",
-                "%11",
-            ),
-            runner.calls,
-        )
-        self.assertIn(
-            (
-                "/tmux",
-                "set-option",
-                "-p",
-                "-t",
-                "%12",
-                "@codex_role",
-                "judger",
-            ),
-            runner.calls,
-        )
-        profile_checks = [call for call in runner.calls if call[0] == "/codex"]
-        self.assertEqual(3, len(profile_checks))
-        self.assertEqual(
-            "codex-crew-three-agent-dev-worker", profile_checks[1][2]
-        )
+        self.assertFalse(any(command[1] == "set-option" for command in runner.calls))
 
-    def test_failure_after_window_creation_rolls_back_exact_window(self) -> None:
-        runner = FakeRunner(fail_first_split=True)
+    def test_discovery_deadline_is_nonzero_failure_and_preserves_window(self) -> None:
+        self.assertEqual(120.0, DEFAULT_DISCOVERY_TIMEOUT_SECONDS)
+        state = DiscoveryState({"judger": "inProgress"})
+        runner = FakeRunner(state)
+        clock = Clock()
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / "README.md").write_text("# Product\n", encoding="utf-8")
+            with self.assertRaises(LaunchError) as caught:
+                launch_crew(
+                    project,
+                    app_server_endpoint=ENDPOINT,
+                    tmux_executable="/tmux",
+                    codex_executable="/codex",
+                    runner=runner,
+                    connection_factory=lambda endpoint: FakeConnection(state, endpoint),
+                    discovery_timeout_seconds=0.2,
+                    discovery_poll_seconds=0.1,
+                    sleep=clock.sleep,
+                    monotonic=clock.monotonic,
+                    marker_factory=lambda: "launch-timeout",
+                )
+        message = str(caught.exception)
+        self.assertIn("crew window @7", message)
+        self.assertIn("missing roles: judger", message)
+        self.assertIn("window preserved for diagnosis", message)
+        self.assertNotIn(("/tmux", "kill-window", "-t", "@7"), runner.calls)
+
+    def test_terminal_bootstrap_failures_fail_closed_and_preserve_window(self) -> None:
+        cases = {
+            "failed": "status 'failed'",
+            "interrupted": "status 'interrupted'",
+            "wrong": "expected 'role=worker'",
+            "missing": "no authoritative final_answer agentMessage",
+        }
+        for outcome, expected in cases.items():
+            with self.subTest(outcome=outcome):
+                state = DiscoveryState({"worker": outcome})
+                runner = FakeRunner(state)
+                with tempfile.TemporaryDirectory() as directory:
+                    project = Path(directory)
+                    (project / "README.md").write_text(
+                        "# Product\n", encoding="utf-8"
+                    )
+                    with self.assertRaises(LaunchError) as caught:
+                        launch_crew(
+                            project,
+                            app_server_endpoint=ENDPOINT,
+                            tmux_executable="/tmux",
+                            codex_executable="/codex",
+                            runner=runner,
+                            connection_factory=lambda endpoint: FakeConnection(
+                                state, endpoint
+                            ),
+                            marker_factory=lambda: f"launch-{outcome}",
+                        )
+                message = str(caught.exception)
+                self.assertIn("crew window @7", message)
+                self.assertIn("role 'worker'", message)
+                self.assertIn(expected, message)
+                self.assertIn("window preserved for diagnosis", message)
+                self.assertNotIn(
+                    ("/tmux", "kill-window", "-t", "@7"), runner.calls
+                )
+
+    def test_tmux_failure_kills_only_the_created_window(self) -> None:
+        state = DiscoveryState()
+        runner = FakeRunner(state, fail_first_split=True)
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / "README.md").write_text("# Product\n", encoding="utf-8")
+            with self.assertRaisesRegex(LaunchError, "failed to create the worker pane"):
+                launch_crew(
+                    project,
+                    app_server_endpoint=ENDPOINT,
+                    tmux_executable="/tmux",
+                    codex_executable="/codex",
+                    runner=runner,
+                    connection_factory=lambda endpoint: FakeConnection(state, endpoint),
+                    marker_factory=lambda: "launch-two",
+                )
+        self.assertIn(("/tmux", "kill-window", "-t", "@7"), runner.calls)
+
+    def test_app_server_preflight_failure_does_not_mutate_tmux(self) -> None:
+        state = DiscoveryState()
+        runner = FakeRunner(state)
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory)
             (project / "README.md").write_text("# Product\n", encoding="utf-8")
 
-            with self.assertRaisesRegex(LaunchError, "worker pane"):
+            def unavailable(endpoint: str):
+                raise AppServerError("socket unavailable")
+
+            with self.assertRaisesRegex(LaunchError, "discovery preflight"):
                 launch_crew(
                     project,
+                    app_server_endpoint=ENDPOINT,
                     tmux_executable="/tmux",
                     codex_executable="/codex",
                     runner=runner,
+                    connection_factory=unavailable,
                 )
-
-        self.assertEqual(
-            ("/tmux", "kill-window", "-t", "@7"),
-            runner.calls[-1],
+        self.assertFalse(
+            any(command[1] in {"new-window", "split-window"} for command in runner.calls)
         )
-
-    def test_explicit_unknown_loop_fails_before_external_commands(self) -> None:
-        runner = FakeRunner()
-        with tempfile.TemporaryDirectory() as directory:
-            project = Path(directory)
-            (project / "README.md").write_text("# Product\n", encoding="utf-8")
-
-            with self.assertRaisesRegex(LaunchError, "unknown loop package"):
-                launch_crew(
-                    project,
-                    loop_id="missing-loop",
-                    tmux_executable="/tmux",
-                    codex_executable="/codex",
-                    runner=runner,
-                )
-
-        self.assertEqual([], runner.calls)
-
-    def test_target_requires_root_readme_for_black_box_judger(self) -> None:
-        runner = FakeRunner()
-        with tempfile.TemporaryDirectory() as directory:
-            with self.assertRaisesRegex(LaunchError, "no README.md"):
-                launch_crew(
-                    directory,
-                    tmux_executable="/tmux",
-                    codex_executable="/codex",
-                    runner=runner,
-                )
-
-        self.assertEqual([], runner.calls)
 
 
 if __name__ == "__main__":

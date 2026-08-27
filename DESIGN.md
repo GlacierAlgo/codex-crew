@@ -1,127 +1,133 @@
-# 设计说明
+# Design
 
-## 目标
+## Authorities
 
-本项目承担三条紧密关联的路径：发现、验证并物化 repository-owned loop package；
-在现有 tmux session 中按 manifest 确定性启动 ordered role panes；Codex `Stop`
-Hook 触发后，将这一 turn 的最终消息以及“截至此时”的 session usage/goal 快照
-可靠地写入本地 SQLite，并让 Commander 判断 turn 已经完成。
+`loops/index.md` 负责 loop routing；`loops/three-agent-dev/manifest.toml` 负责 ordered
+roles、runtime profiles、model、reasoning effort 与 tmux layout。Role Markdown 是唯一
+editable instruction source，installed profile TOML 只是派生 adapter。
 
-不承担模型计费定价、跨机器队列、完整可观测平台或 Redis 事件总线。
+Native `thread_id` 是 control identity。App Server 保存 thread/turn/item lifecycle；
+codex-crew 不复制该 authority 到 SQLite 或 tmux。
 
-## Loop package contract
-
-`loops/<loop-id>/` 是自包含 package，至少包含 `manifest.toml`、`loop.md` 和 manifest
-引用的 role Markdown。`manifest.toml` 是唯一 runtime authority，声明：
-
-- stable loop ID 与 package-local manual；
-- ordered roles 与每个 role 的 package-local instructions；
-- namespaced runtime profile ID、model、reasoning effort；
-- tmux layout、column count 与 equal-width constraint。
-
-discovery/validation 只使用标准库 `tomllib`。package ID 必须匹配 directory；manual
-和 role instructions 必须解析为 package 内的 Markdown；role/profile 必须唯一；
-`columns` 必须等于 ordered role count。当前 kernel 支持并强制
-`even-horizontal` + `equal_width=true`，因此新增合规 loop 以新增 package 为主。
-
-Repository Markdown + manifest 是唯一 editable authority。`loop install` 把确定性
-TOML adapter 写入 ignored `.codex-crew/generated/<loop-id>/`，再从
-`$CODEX_HOME/<runtime-profile>.config.toml` 建 symlink。所有 generated target 和
-runtime target 在任何写入前统一 preflight；regular file、错误 symlink、非 managed
-adapter 等冲突一律 fail closed。`loop check` 校验 source、exact adapter bytes 与
-symlink target。
-
-## Launcher contract
-
-`codex-crew launch TARGET` 默认 loop 为 `three-agent-dev`、默认 tmux session 为
-`default`；`--loop` 可显式选择其他 discovered package：
-
-- 创建一个 detached window，不切换当前 client。
-- ordered roles、runtime profiles、model、reasoning effort 与 layout 全部来自选中
-  manifest；launcher 不保留 role/profile policy 常量。
-- 每个进程使用 manifest 的 namespaced runtime profile，并以 `-C TARGET` 共享
-  同一个 working root。
-- window options 持久化 target、loop ID 与动态派生的 `@codex_<role>_pane`；每个
-  pane 使用 `@codex_role` 声明 role。
-- CLI 输出 ordered pane metadata 与 generic `pane_mapping`，不把公共结果绑定到
-  固定 role fields。
-- 所有 read-only preflight 在创建 window 前完成；创建后的任何失败都只按返回的
-  `window_id` 回滚本次 window。
-
-## 数据流
-
-```text
-Codex Stop Hook stdin
-        │
-        ├── session_id / turn_id / model / last_assistant_message
-        │
-        └── transcript_path
-                 │
-                 ├── 最新 token_count.total_token_usage
-                 └── 最新 thread_goal_updated.goal
-        │
-        ▼
-幂等 upsert: (session_id, turn_id)
-        │
-        ├── SQLite WAL
-        └── tmux pane user options
+```mermaid
+flowchart TD
+    MANIFEST["manifest.toml<br/>roles / profiles / layout"]
+    UP["up<br/>ordered startup gates"]
+    PROFILES["repo generated profiles<br/>CODEX_HOME symlinks"]
+    SESSION["exact tmux session<br/>reuse or create"]
+    REPO_RUNTIME[".codex-crew/runtime<br/>socket / PID / log"]
+    LAUNCHER["launcher<br/>tmux layout + TUI bootstrap"]
+    APP["Codex App Server<br/>thread / turn / item authority"]
+    CLI["crew CLI<br/>endpoint + thread_id"]
+    TMUX["tmux window<br/>visual panes only"]
+    STOP["Stop Hook SQLite<br/>independent snapshots"]
+    subgraph NATIVE_RUNTIME["Native-thread runtime"]
+        LAUNCHER
+        APP
+        CLI
+    end
+    MANIFEST --> UP
+    MANIFEST --> LAUNCHER
+    UP --> PROFILES
+    UP --> SESSION
+    UP --> REPO_RUNTIME
+    UP --> LAUNCHER
+    REPO_RUNTIME --> APP
+    LAUNCHER --> TMUX
+    LAUNCHER --> APP
+    CLI --> APP
+    STOP -. "no target-resolution dependency" .-> APP
 ```
 
-官方 OpenAI 文档说明，`Stop` Hook 提供 `turn_id`、`stop_hook_active` 和
-`last_assistant_message`，并继承 `session_id`、`transcript_path`、`model` 等公共
-字段：<https://developers.openai.com/codex/hooks/#stop>。
+## One-click startup transaction
 
-App Server 的 goal 对象提供 `objective`、`status`、`tokenBudget`、`tokensUsed` 和
-`timeUsedSeconds`：<https://developers.openai.com/codex/app-server/#manage-a-thread-goal>。
+`up [PROJECT_DIR]` owns only the stable pre-launch orchestration and returns the unchanged
+`CrewLaunch` result:
 
-## 表结构
+1. Resolve the repository and target project, load the manifest, then run deterministic profile
+   install and check against `<repo>/.codex-crew/generated/`. `$CODEX_HOME` receives only the
+   managed symlinks; Codex auth never enters the repository.
+2. Probe `tmux has-session -t =SESSION`. Reuse success; otherwise create only
+   `tmux new-session -d -s SESSION -c PROJECT_DIR`. Startup never kills a user session or window.
+3. Resolve the fixed endpoint
+   `unix://<repo>/.codex-crew/runtime/app-server.sock`. A ready endpoint is reused. Otherwise,
+   validate the exact repo runtime directory and PID/socket/log artifact types before starting
+   `codex app-server --listen ENDPOINT` with `stdin=DEVNULL`, detached process session, and stdout/
+   stderr appended to the repo log.
+4. Persist the child PID and poll protocol readiness with a bounded deadline. A dead owned PID
+   permits cleanup only of the exact PID/socket paths. An invalid PID, orphan socket, or live PID
+   paired with an unready endpoint fails closed without killing or launching over that process.
+5. Only after every gate succeeds, call `launch_crew` with the same resolved `codex`, `tmux`,
+   project, session, loop, and explicit repo endpoint.
 
-唯一表为 `turn_stop_snapshot`：
+`.codex-crew/` is ignored as one unit, so generated adapters and runtime artifacts never become
+canonical source. The tracked authorities remain `bin/`, `codex_crew/`, and `loops/`.
 
-| 字段组 | 字段 |
-| --- | --- |
-| 标识 | `session_id`, `turn_id`, `asof_at` |
-| 上下文 | `model`, `final_text` |
-| 模型累计 usage | `input_tokens`, `cached_input_tokens`, `cache_write_input_tokens`, `output_tokens`, `reasoning_output_tokens` |
-| Goal 快照 | `goal_objective_excerpt`, `goal_created_at`, `goal_status`, `goal_token_budget`, `goal_tokens_used`, `goal_time_used_seconds` |
+## Launch transaction
 
-Goal 不存在或 transcript 无法解析时，相关列为 `NULL`。不保存冗余的
-`total_tokens`；展示时计算 `input_tokens + output_tokens`。
+1. Validate loop package, target project, tmux session and all manifest profiles.
+2. Call paginated `thread/list` with exact `cwd` and interactive
+   `sourceKinds=[cli,vscode]` to capture the pre-launch thread-id set. Live remote TUI evidence
+   uses both sources, so neither may be excluded. Pagination and socket operations are bounded.
+3. Generate one launch nonce and one role-specific marker. Each pane starts a fresh Codex TUI:
+   `--profile`, `--strict-config`, `--yolo`, `--remote`, `-C`, bootstrap prompt.
+4. Create one window, split twice horizontally, and apply `even-horizontal`. No tmux option is
+   a control-plane field.
+5. Poll `thread/list`, subtract the pre-launch set, and `thread/read(includeTurns=true)` only the
+   candidates. A correlation requires the exact marker line, exact `role=...` line, the
+   `cwd`-filtered list, `turn.status=completed`, and an authoritative final-phase `agentMessage`
+   whose first line exactly equals `role=<role>`.
+6. Return a `CrewLaunch` only after all three roles COMMIT. Deadline, `failed`, `interrupted`,
+   wrong identity, missing final, or ambiguous matches raise `LaunchError` with the exact window
+   ID and affected role. The CLI exits nonzero while preserving the visual window for diagnosis.
 
-`goal_created_at` 用于区分同一 session 中先后替换的不同 goal。官方行为是：提供
-新的 objective 会替换 goal 并重置 usage accounting。
+The production committed-identity deadline is 120 seconds, matching the expected risk envelope
+for three profiled xhigh bootstrap turns. Tests inject much smaller deadlines to exercise the same
+fail-closed path without weakening the production default.
 
-## Objective 缩略规则
+No `thread/start`, binding insert, or `codex resume` occurs before TUI startup. A tmux creation
+failure kills only the just-created window. Discovery failure after successful pane startup leaves
+the visible window intact but never returns a partial-success launch result.
 
-按 Unicode code point 计数：
+## Native control
 
-- 长度小于等于 40：原样保存。
-- 长度大于 40：前 20 + `...` + 后 20。
-- 缩略后的最大长度为 43。
+Every crew operation accepts `endpoint` and one exact `thread_id`:
 
-因此不会从 UTF-8 字节中间切断中文。字段名使用 `goal_objective_excerpt`，避免误以为
-它始终保存完整 objective。
+- `status`: `thread/read(includeTurns=true)` and validate one-or-zero active turns.
+- `send`: read precondition, `turn/start`, bounded `-32001` retry, then reconcile ambiguous
+  transport outcome from the before/after turn set and exact user item.
+- `steer`: read and require `expectedTurnId` to equal the authoritative active turn.
+- `wait`: read, return immediately if terminal, otherwise bare `thread/resume` to subscribe the
+  current connection, read again, then consume `item/completed`, token usage,
+  `turn/completed`, and status events for the exact thread/turn.
+- `final`: read only and require a completed turn with an authoritative final-phase
+  `agentMessage`.
+- `goal`: direct `thread/goal/get|set|clear` calls.
 
-## 累计快照语义
+`thread/resume` is not identity creation or configuration replay. It exists only inside an active
+`wait` subscription window because `thread/read` is intentionally non-subscribing.
 
-usage 列记录 session 累计计数。若 session A 有三个 Stop，只能取最新一行参与
-跨 session 汇总。每 turn 用量是当前快照减去上一快照。
+The native control module has no tmux query/mutation function, role lookup, window locator,
+database path, binding dataclass, or shared Stop fallback. Unknown/malformed thread state and Unix
+WebSocket protocol violations fail closed.
 
-`goal_tokens_used` 单独保留，命名为 goal-visible usage；它不能代替 input/cache/
-output usage，也不能用于推断未纳入该 goal 的独立 pane 消耗。
+## Independent Stop snapshots
 
-## 并发与失败策略
+`turn_stop_snapshot` stores cumulative transcript usage and final text captured by a direct Stop
+Hook. `latest`, top-level `final`, and `summary` query this table. It has no crew binding table and
+does not project completion metadata into tmux.
 
-- SQLite 使用 WAL 和 5 秒 busy timeout，允许多个 pane 短事务并发写入。
-- `(session_id, turn_id)` 主键使重复 Stop 投递成为幂等更新。
-- transcript 中的未知、损坏记录被忽略。
-- 任何读取或写入错误只写 stderr，并让 Hook 输出 `{}`、退出 0。
-- 写库成功后才把 tmux `@codex_status` 设置为 `complete`；失败时设置为
-  `capture_error`。
-- 不把完整 final 放进 tmux option，避免大小、转义和终端渲染问题。
+Native crew `final` never reads this database. Keeping the two surfaces separate prevents a stale
+hook observation from overriding App Server turn/item authority.
 
-## 兼容性边界
+## Public compatibility boundary
 
-Codex 官方说明 transcript 格式不是稳定 Hook API。解析逻辑因此集中在
-`codex_crew/transcript.py`，同时兼容当前 rollout 的 snake_case 事件以及 App Server
-camelCase notification。未来格式变化只需修改这一模块；SQLite 字段契约保持不变。
+This migration intentionally removes window/role binding-backed target resolution and
+direct/app-server runtime selection. No compatibility module, lazy re-export, deprecated schema,
+or alternate wire URI remains.
+
+`up` is the primary public startup surface. Low-level `launch` remains an explicit-endpoint
+diagnostic and does not duplicate profile, session, or server ownership.
+
+`codex://THREAD_ID` may be displayed only when opening a thread in the Codex App; transport calls
+continue to use the explicit Unix endpoint plus raw native `thread_id`.

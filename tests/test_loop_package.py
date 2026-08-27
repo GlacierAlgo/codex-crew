@@ -39,7 +39,7 @@ class LoopPackageTests(unittest.TestCase):
         self.assertEqual({"gpt-5.6-sol"}, {role.model for role in package.roles})
         self.assertEqual({"xhigh"}, {role.reasoning_effort for role in package.roles})
 
-    def test_runtime_manual_excludes_operator_bootstrap(self) -> None:
+    def test_runtime_manual_uses_only_native_thread_control(self) -> None:
         manual = load_loop_package().manual_path.read_text(encoding="utf-8")
 
         for forbidden in (
@@ -50,7 +50,61 @@ class LoopPackageTests(unittest.TestCase):
             "symlink",
         ):
             self.assertNotIn(forbidden, manual)
-        self.assertIn("由 operator 在 session 启动前外部", manual)
+        self.assertNotIn("codex app-server --listen", manual)
+        self.assertNotIn("@codex_crew_transport", manual)
+        self.assertNotIn("--window", manual)
+        self.assertNotIn("--role", manual)
+        self.assertIn("--endpoint", manual)
+        self.assertIn("--thread-id", manual)
+        for command in (
+            "crew status",
+            "crew send",
+            "crew steer",
+            "crew wait",
+            "crew final",
+            "crew goal get",
+            "crew goal set",
+            "crew goal clear",
+        ):
+            self.assertIn(command, manual)
+        self.assertIn("tmux 只负责可视", manual)
+        self.assertIn("Completion comes from `turn/completed`", manual)
+
+    def test_native_migration_has_no_binding_or_tmux_control_residue(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        production_paths = [
+            *sorted((root / "codex_crew").glob("*.py")),
+            root / "README.md",
+            root / "DESIGN.md",
+            *sorted((root / "loops" / "three-agent-dev").glob("*.md")),
+        ]
+        production = "\n".join(
+            path.read_text(encoding="utf-8") for path in production_paths
+        )
+        for forbidden in (
+            "crew_thread_binding",
+            "prepare_shared_bindings",
+            "@codex_crew_db",
+            "thread://",
+        ):
+            self.assertNotIn(forbidden, production)
+        runtime_source = (root / "codex_crew" / "crew_runtime.py").read_text(
+            encoding="utf-8"
+        )
+        for forbidden in (
+            "send-keys",
+            "paste-buffer",
+            "load-buffer",
+            "capture-pane",
+            "set-option",
+            "show-options",
+        ):
+            self.assertNotIn(forbidden, runtime_source)
+        launcher_source = (root / "codex_crew" / "launcher.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("resume", launcher_source)
+        self.assertFalse((root / "codex_crew" / "crew_control.py").exists())
 
     def test_install_is_deterministic_idempotent_and_checkable(self) -> None:
         package = load_loop_package()

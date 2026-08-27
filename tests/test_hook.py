@@ -15,18 +15,25 @@ class HookTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             transcript = root / "rollout.jsonl"
-            transcript.write_text(json.dumps({
-                "type": "event_msg",
-                "payload": {
-                    "type": "token_count",
-                    "info": {"total_token_usage": {
-                        "input_tokens": 30,
-                        "cached_input_tokens": 20,
-                        "output_tokens": 6,
-                        "reasoning_output_tokens": 2,
-                    }},
-                },
-            }), encoding="utf-8")
+            transcript.write_text(
+                json.dumps(
+                    {
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "token_count",
+                            "info": {
+                                "total_token_usage": {
+                                    "input_tokens": 30,
+                                    "cached_input_tokens": 20,
+                                    "output_tokens": 6,
+                                    "reasoning_output_tokens": 2,
+                                }
+                            },
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
             database = root / "snapshots.sqlite3"
             capture_stop(
                 {
@@ -45,10 +52,12 @@ class HookTests(unittest.TestCase):
         self.assertEqual(30, row["input_tokens"])
         self.assertEqual(20, row["cached_input_tokens"])
 
-    def test_hook_is_fail_open_for_invalid_input(self) -> None:
+    def test_hook_is_fail_open_and_has_no_tmux_projection(self) -> None:
         stdout = StringIO()
         stderr = StringIO()
-        exit_code = run_stop_hook(stdin=StringIO("not-json"), stdout=stdout, stderr=stderr)
+        exit_code = run_stop_hook(
+            stdin=StringIO("not-json"), stdout=stdout, stderr=stderr
+        )
         self.assertEqual(0, exit_code)
         self.assertEqual("{}\n", stdout.getvalue())
         self.assertIn("failed to capture", stderr.getvalue())

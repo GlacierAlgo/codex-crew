@@ -64,7 +64,11 @@ def default_database_path() -> Path:
     if configured:
         return Path(configured).expanduser()
     state_home = os.environ.get("XDG_STATE_HOME")
-    root = Path(state_home).expanduser() if state_home else Path.home() / ".local" / "state"
+    root = (
+        Path(state_home).expanduser()
+        if state_home
+        else Path.home() / ".local" / "state"
+    )
     return root / "codex-crew" / "snapshots.sqlite3"
 
 

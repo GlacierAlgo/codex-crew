@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "codex-crew"
 version = "0.1.0"
-description = "Launch a tmux Codex crew and capture Stop snapshots in local SQLite."
+description = "Launch a tmux Codex crew and control native App Server threads."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
