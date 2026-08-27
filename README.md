@@ -5,6 +5,36 @@ Codex TUI。tmux 只提供 manifest-defined 等宽可视布局；所有派发、
 操作都直接使用 App Server native `thread_id`。默认 `three-agent-dev` 仍启动
 Commander、Worker、Judger 三列。
 
+## Global ergonomic entrypoint
+
+以 editable tool 安装 repository-owned CLI（把示例路径替换为本 checkout 的绝对路径）：
+
+```bash
+uv tool install --editable /absolute/path/to/codex-crew
+```
+
+全局启动 contract 是 `crew LOOP_ID [PROJECT_DIR]`：
+
+```bash
+crew three-agent-dev
+crew api-budget-design /path/to/project --json
+```
+
+`PROJECT_DIR` 省略时使用命令 invocation cwd 的 resolved path；提供时显式覆盖它。
+`--session`、`--window-name` 与 `--json` 直接传入现有 one-click startup。默认 tmux
+window name 是 `crew-<loop-id>-<project-slug>`；显式 `--window-name` 优先。
+
+`LOOP_ID` completion 每次从本 repository 的 `loops/` registry 动态读取，目录参数使用
+shell path completion。持久启用 zsh completion 的一种方式是在 `~/.zshrc` 中加入：
+
+```zsh
+eval "$(crew --show-completion zsh)"
+```
+
+重新打开 shell，或 source 该配置后，`crew <TAB>` 会列出当前已注册的
+`three-agent-dev` 与 `api-budget-design`。`--show-completion` 同时支持 `bash` 和 `fish`。
+安装与 shell 配置由用户显式执行；startup command 本身不会修改 shell config。
+
 ## One-click startup
 
 要求 Python 3.11+、`uv`、`tmux` 与已完成登录的 `codex`。在本 repository root 一次启动：
@@ -14,7 +44,8 @@ Commander、Worker、Judger 三列。
 ```
 
 `PROJECT_DIR` 省略时默认为当前目录；`--session` 默认是 `default`，`--loop` 默认是
-`three-agent-dev`。`up` 在一次调用内严格依次完成：
+`three-agent-dev`。现有 `codex-crew up` 保持兼容；全局 `crew LOOP_ID [PROJECT_DIR]`
+调用同一个 `up_crew` transaction。startup 在一次调用内严格依次完成：
 
 1. 从所选 `loops/<loop-id>/manifest.toml` 加载该 loop 的唯一 runtime authority；
 2. 按 manifest role count 幂等生成并检查 repo-derived profile adapters；
@@ -128,6 +159,11 @@ App Server lifecycle 只清理由 exact repo runtime path 和 dead PID 共同证
 Unix socket。endpoint 不 ready 且 PID 仍 live、PID file 无效、socket 没有 owned PID，或
 runtime artifact 类型冲突时一律 fail closed，并在错误中给出 endpoint、PID/log path 等
 诊断位置。
+
+所有 high-level `crew` 与 `codex-crew up` targets 共享 repository-owned explicit endpoint
+`unix://<codex-crew-repo>/.codex-crew/runtime/app-server.sock`；它不是 bare `unix://`。
+Bare `unix://` default 只属于 low-level diagnostic/control endpoint resolution，不会被
+high-level startup 传播给 Codex TUI。
 
 ## Runtime model
 

@@ -10,6 +10,7 @@ import shlex
 from typing import Any, Sequence
 
 import click
+from click.shell_completion import CompletionItem, get_completion_class
 
 from codex_crew.app_server import (
     DEFAULT_APP_SERVER_ENDPOINT,
@@ -434,6 +435,94 @@ def crew_goal_clear_command(
     _emit_crew_result(result, json_output=json_output)
 
 
+def _complete_loop_ids(
+    context: click.Context,
+    parameter: click.Parameter,
+    incomplete: str,
+) -> list[CompletionItem]:
+    """Complete loop IDs from the repository registry at invocation time."""
+
+    del context, parameter
+    try:
+        packages = discover_loop_packages()
+    except LoopPackageError:
+        return []
+    return [
+        CompletionItem(package.id)
+        for package in packages
+        if package.id.startswith(incomplete)
+    ]
+
+
+def _show_completion(
+    context: click.Context,
+    parameter: click.Parameter,
+    shell: str | None,
+) -> None:
+    """Emit Click completion source without requiring startup arguments."""
+
+    del parameter
+    if shell is None or context.resilient_parsing:
+        return
+    completion_class = get_completion_class(shell)
+    if completion_class is None:
+        raise click.ClickException(f"shell completion is not available for {shell!r}")
+    completion = completion_class(
+        context.command,
+        {},
+        "crew",
+        "_CREW_COMPLETE",
+    )
+    click.echo(completion.source())
+    context.exit()
+
+
+@click.command("crew", help="Launch one repository-owned Codex loop.")
+@click.argument("loop_id", shell_complete=_complete_loop_ids)
+@click.argument(
+    "project_dir",
+    required=False,
+    type=click.Path(path_type=Path, file_okay=False, resolve_path=True),
+)
+@click.option("--session", default="default", show_default=True)
+@click.option(
+    "--window-name",
+    help="tmux window name (default: crew-<loop-id>-<project>).",
+)
+@click.option("--json", "json_output", is_flag=True)
+@click.option(
+    "--show-completion",
+    type=click.Choice(("zsh", "bash", "fish"), case_sensitive=False),
+    callback=_show_completion,
+    is_eager=True,
+    expose_value=False,
+    help="Print shell completion source and exit.",
+)
+def crew_entrypoint(
+    loop_id: str,
+    project_dir: Path | None,
+    session: str,
+    window_name: str | None,
+    json_output: bool,
+) -> None:
+    """Resolve a target and run the existing repository-owned startup path."""
+
+    target = (project_dir or Path.cwd()).resolve()
+    try:
+        result = up_crew(
+            target,
+            loop_id=loop_id,
+            session=session,
+            window_name=window_name,
+        )
+    except StartupError as error:
+        raise click.ClickException(str(error)) from error
+    if json_output:
+        click.echo(json.dumps(result.as_dict(), ensure_ascii=False, indent=2))
+    else:
+        _print_launch(result)
+
+
 @cli.command("up", help="Prepare and launch a repository-owned Codex crew.")
 @click.argument(
     "project_dir",
@@ -443,7 +532,10 @@ def crew_goal_clear_command(
 )
 @click.option("--loop", "loop_id", default=DEFAULT_LOOP_ID, show_default=True)
 @click.option("--session", default="default", show_default=True)
-@click.option("--window-name", help="tmux window name (default: crew-<project>).")
+@click.option(
+    "--window-name",
+    help="tmux window name (default: crew-<loop-id>-<project>).",
+)
 @click.option("--json", "json_output", is_flag=True)
 def up(
     project_dir: Path,
@@ -486,7 +578,10 @@ def up(
 @click.option(
     "--session", default="default", show_default=True, help="Existing tmux session."
 )
-@click.option("--window-name", help="tmux window name (default: crew-<project>).")
+@click.option(
+    "--window-name",
+    help="tmux window name (default: crew-<loop-id>-<project>).",
+)
 @click.option("--json", "json_output", is_flag=True)
 def launch(
     project_dir: Path,
@@ -513,10 +608,22 @@ def launch(
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    return _run_click(cli, "codex-crew", argv)
+
+
+def crew_main(argv: Sequence[str] | None = None) -> int:
+    return _run_click(crew_entrypoint, "crew", argv)
+
+
+def _run_click(
+    command: click.Command,
+    prog_name: str,
+    argv: Sequence[str] | None,
+) -> int:
     try:
-        result = cli.main(
+        result = command.main(
             args=None if argv is None else list(argv),
-            prog_name="codex-crew",
+            prog_name=prog_name,
             standalone_mode=False,
         )
     except click.ClickException as error:

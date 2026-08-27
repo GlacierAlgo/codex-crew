@@ -195,6 +195,9 @@ class LauncherTests(unittest.TestCase):
 
         self.assertEqual("even-horizontal", result.layout)
         self.assertEqual(
+            f"crew-three-agent-dev-{project.name}", result.window_name
+        )
+        self.assertEqual(
             {
                 "commander": "thread-commander",
                 "worker": "thread-worker",
@@ -262,6 +265,9 @@ class LauncherTests(unittest.TestCase):
             )
 
         self.assertEqual("api-budget-design", result.loop_id)
+        self.assertEqual(
+            f"crew-api-budget-design-{project.name}", result.window_name
+        )
         self.assertEqual("even-horizontal", result.layout)
         self.assertEqual(
             {

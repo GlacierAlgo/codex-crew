@@ -13,7 +13,7 @@ codex-crew 不复制该 authority 到 SQLite 或 tmux。
 ```mermaid
 flowchart TD
     MANIFEST["manifest.toml<br/>roles / profile config / layout"]
-    UP["up<br/>ordered startup gates"]
+    UP["crew / up<br/>ordered startup gates"]
     PROFILES["repo generated profiles<br/>CODEX_HOME symlinks"]
     SESSION["exact tmux session<br/>reuse or create"]
     REPO_RUNTIME[".codex-crew/runtime<br/>socket / PID / log"]
@@ -42,8 +42,10 @@ flowchart TD
 
 ## One-click startup transaction
 
-`up [PROJECT_DIR]` owns only the stable pre-launch orchestration and returns the unchanged
-`CrewLaunch` result:
+`crew LOOP_ID [PROJECT_DIR]` is the global ergonomic entrypoint; existing
+`codex-crew up [PROJECT_DIR] --loop LOOP_ID` remains compatible. Both call `up_crew`, which owns
+only the stable pre-launch orchestration and returns the unchanged `CrewLaunch` result. An omitted
+`crew` project uses the invocation cwd's resolved path; an explicit project overrides it:
 
 1. Resolve the repository and target project, load the manifest, then run deterministic profile
    install and check against `<repo>/.codex-crew/generated/`. `$CODEX_HOME` receives only the
@@ -60,6 +62,11 @@ flowchart TD
    paired with an unready endpoint fails closed without killing or launching over that process.
 5. Only after every gate succeeds, call `launch_crew` with the same resolved `codex`, `tmux`,
    project, session, loop, and explicit repo endpoint.
+
+Every high-level `crew`/`up` target therefore shares the repository-owned explicit socket
+`unix://<repo>/.codex-crew/runtime/app-server.sock`; this endpoint is never bare `unix://`.
+The bare default is confined to low-level diagnostic/control endpoint resolution. Every launched
+TUI still receives the explicit endpoint together with `-C` set to the resolved target.
 
 `.codex-crew/` is ignored as one unit, so generated adapters and runtime artifacts never become
 canonical source. The tracked authorities remain `bin/`, `codex_crew/`, and `loops/`.
@@ -131,8 +138,11 @@ This migration intentionally removes window/role binding-backed target resolutio
 direct/app-server runtime selection. No compatibility module, lazy re-export, deprecated schema,
 or alternate wire URI remains.
 
-`up` is the primary public startup surface. Low-level `launch` remains an explicit-endpoint
-diagnostic and does not duplicate profile, session, or server ownership.
+`crew LOOP_ID [PROJECT_DIR]` is the primary global startup surface, while `codex-crew up` remains
+the compatible repository CLI surface. Low-level `launch` remains an endpoint diagnostic and does
+not duplicate profile, session, or server ownership. Default window identity is
+`crew-<loop-id>-<project-slug>` so different loops remain visually distinct; explicit
+`--window-name` wins.
 
 `codex://THREAD_ID` may be displayed only when opening a thread in the Codex App; transport calls
 continue to use the explicit Unix endpoint plus raw native `thread_id`.

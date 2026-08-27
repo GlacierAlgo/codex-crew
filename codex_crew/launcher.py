@@ -157,7 +157,7 @@ def launch_crew(
         for role in package.roles
     }
 
-    name = window_name or _default_window_name(project)
+    name = window_name or _default_window_name(package.id, project)
     window_id: str | None = None
     pane_ids: list[str] = []
     try:
@@ -517,9 +517,9 @@ def _require_executable(name: str) -> str:
     return executable
 
 
-def _default_window_name(project: Path) -> str:
+def _default_window_name(loop_id: str, project: Path) -> str:
     slug = re.sub(r"[^\w.-]+", "-", project.name, flags=re.UNICODE).strip("-.")
-    return f"crew-{slug or 'project'}"
+    return f"crew-{loop_id}-{slug or 'project'}"
 
 
 def _codex_command(

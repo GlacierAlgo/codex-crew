@@ -9,7 +9,7 @@ from unittest.mock import patch
 from click.testing import CliRunner
 
 from codex_crew.app_server import AppServerEndpoint
-from codex_crew.cli import cli
+from codex_crew.cli import cli, crew_entrypoint
 from codex_crew.crew_runtime import CrewCommandResult
 from codex_crew.launcher import CrewLaunch, CrewPane, LaunchError
 from codex_crew.startup import StartupError
@@ -48,6 +48,101 @@ def _launch_result(
 
 
 class ClickCliTests(unittest.TestCase):
+    @patch("codex_crew.cli.up_crew")
+    def test_crew_entrypoint_defaults_to_resolved_invocation_cwd(
+        self, up_mock
+    ) -> None:
+        up_mock.return_value = _launch_result(
+            "unix:///repo/.codex-crew/runtime/app-server.sock"
+        )
+        runner = CliRunner()
+        with runner.isolated_filesystem() as directory:
+            invocation_cwd = Path(directory).resolve()
+            result = runner.invoke(
+                crew_entrypoint,
+                ["three-agent-dev", "--json"],
+            )
+
+        self.assertEqual(0, result.exit_code, result.output)
+        up_mock.assert_called_once_with(
+            invocation_cwd,
+            loop_id="three-agent-dev",
+            session="default",
+            window_name=None,
+        )
+
+    @patch("codex_crew.cli.up_crew")
+    def test_crew_entrypoint_explicit_project_overrides_cwd(self, up_mock) -> None:
+        up_mock.return_value = _launch_result(
+            "unix:///repo/.codex-crew/runtime/app-server.sock",
+            loop_id="api-budget-design",
+            roles=("designer_3", "designer_4", "designer_5", "designer_6"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory) / "target"
+            project.mkdir()
+            result = CliRunner().invoke(
+                crew_entrypoint,
+                [
+                    "api-budget-design",
+                    str(project),
+                    "--session",
+                    "research",
+                    "--window-name",
+                    "explicit-name",
+                    "--json",
+                ],
+            )
+
+        self.assertEqual(0, result.exit_code, result.output)
+        up_mock.assert_called_once_with(
+            project.resolve(),
+            loop_id="api-budget-design",
+            session="research",
+            window_name="explicit-name",
+        )
+
+    def test_crew_loop_completion_is_registry_backed(self) -> None:
+        result = CliRunner().invoke(
+            crew_entrypoint,
+            [],
+            env={
+                "_CREW_COMPLETE": "bash_complete",
+                "COMP_WORDS": "crew ",
+                "COMP_CWORD": "1",
+            },
+        )
+
+        self.assertEqual(0, result.exit_code, result.output)
+        self.assertEqual(
+            {"plain,api-budget-design", "plain,three-agent-dev"},
+            set(result.output.splitlines()),
+        )
+
+    def test_crew_show_completion_emits_click_source(self) -> None:
+        markers = {
+            "zsh": "#compdef crew",
+            "bash": "complete -o nosort",
+            "fish": "complete --no-files --command crew",
+        }
+        for shell, marker in markers.items():
+            with self.subTest(shell=shell):
+                result = CliRunner().invoke(
+                    crew_entrypoint,
+                    ["--show-completion", shell],
+                )
+                self.assertEqual(0, result.exit_code, result.output)
+                self.assertIn(marker, result.output)
+                self.assertIn("_CREW_COMPLETE", result.output)
+
+    def test_crew_invalid_loop_is_clear_nonzero_error(self) -> None:
+        result = CliRunner().invoke(crew_entrypoint, ["missing-loop"])
+
+        self.assertNotEqual(0, result.exit_code)
+        self.assertIn("unknown loop package 'missing-loop'", result.output)
+        self.assertIn("api-budget-design", result.output)
+        self.assertIn("three-agent-dev", result.output)
+
     @patch("codex_crew.cli.run_stop_hook", return_value=0)
     def test_hook_cli_keeps_independent_snapshot_database(self, hook_mock) -> None:
         with tempfile.TemporaryDirectory() as directory:
