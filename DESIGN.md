@@ -83,9 +83,13 @@ canonical source. The tracked authorities remain `bin/`, `codex_crew/`, and `loo
    uses both sources, so neither may be excluded. Pagination and socket operations are bounded.
 3. Generate one launch nonce and one role-specific marker. Each pane starts a fresh Codex TUI:
    `--profile`, `--strict-config`, `--yolo`, `--remote`, `-C`, bootstrap prompt.
-4. Create one window, split horizontally `role_count - 1` times, and apply `even-horizontal`.
-   The default `three-agent-dev` therefore splits twice; `api-budget-design` splits four times for
-   its five roles.
+4. Create one window and execute the selected manifest layout. `even-horizontal` splits each new
+   role horizontally from the previous pane and then applies the named tmux layout, so the default
+   `three-agent-dev` still splits twice. An explicit `split-plan` instead creates every non-root role
+   from its declared earlier target with the declared horizontal/vertical direction and percentage,
+   and never calls `select-layout`. The `api-budget-design` plan produces column-major `[1,2,2]`:
+   Commander full-height on the left, `worker_3`/`worker_4` in the middle, and
+   `worker_5`/`worker_6` on the right（左1/中23/右45）。
    No tmux option is a control-plane field.
 5. Poll `thread/list`, subtract the pre-launch set, and `thread/read(includeTurns=true)` only the
    candidates. A correlation requires the exact marker line, exact `role=...` line, the
@@ -101,7 +105,7 @@ canonical source. The tracked authorities remain `bin/`, `codex_crew/`, and `loo
    preserves the window and returns no partial launch result.
 8. Return a `CrewLaunch` only after record persistence. It exposes exact
    communication role/thread/pane plus handoff turn/status. For `three-agent-dev` the communication
-   role is Commander; for `api-budget-design` it is Coordinator followed by four designers. It also
+   role is Commander; for `api-budget-design` it is Commander followed by four Workers. It also
    exposes the record path and exact external close command.
    Bootstrap or handoff deadline, `failed`, `interrupted`, wrong identity, missing final, or ambiguous matches raise
    `LaunchError` with the exact window ID and affected role. The CLI exits nonzero while preserving
@@ -110,7 +114,7 @@ canonical source. The tracked authorities remain `bin/`, `codex_crew/`, and `loo
 The production committed-identity deadline is 120 seconds for all manifest-defined profiled
 `high` reasoning, Fast service tier bootstrap turns, and the handoff wait has its own 120-second
 bound. The default loop has three bootstrap turns plus one Commander handoff turn. The API-budget
-loop has five bootstrap turns—one Coordinator and four designers—plus one Coordinator handoff
+loop has five bootstrap turns—one Commander and four Workers—plus one Commander handoff
 turn. Tests inject smaller bounded values where needed without weakening production defaults.
 
 No `thread/start`, binding insert, or `codex resume` occurs before all TUI identity bootstraps

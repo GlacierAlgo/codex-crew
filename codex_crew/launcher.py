@@ -21,8 +21,10 @@ from codex_crew.app_server import (
 )
 from codex_crew.loop_package import (
     DEFAULT_LOOP_ID,
+    EvenHorizontalTmuxLayout,
     LoopPackageError,
     LoopRole,
+    SplitPlanTmuxLayout,
     load_loop_package,
 )
 from codex_crew.crew_runtime import (
@@ -228,41 +230,71 @@ def launch_crew(
         )
         pane_ids.append(first_pane)
 
-        for role in package.roles[1:]:
+        pane_by_role = {first_role.id: first_pane}
+        if isinstance(package.layout, EvenHorizontalTmuxLayout):
+            split_specs = (
+                (role, pane_ids[-1], "-h", None)
+                for role in package.roles[1:]
+            )
+        elif isinstance(package.layout, SplitPlanTmuxLayout):
+            split_specs = (
+                (
+                    role,
+                    pane_by_role[step.target],
+                    "-h" if step.direction == "horizontal" else "-v",
+                    step.percentage,
+                )
+                for role, step in zip(
+                    package.roles[1:], package.layout.steps, strict=True
+                )
+            )
+        else:  # pragma: no cover - parser constructs the closed layout union.
+            raise LaunchError(f"unsupported tmux layout {package.layout!r}")
+
+        for role, target_pane, direction, percentage in split_specs:
+            split_command = [
+                tmux,
+                "split-window",
+                direction,
+            ]
+            if percentage is not None:
+                split_command.extend(("-p", str(percentage)))
+            split_command.extend(
+                (
+                    "-d",
+                    "-P",
+                    "-F",
+                    "#{pane_id}",
+                    "-t",
+                    target_pane,
+                    "-c",
+                    str(project),
+                    _codex_command(
+                        codex,
+                        role.runtime_profile,
+                        project,
+                        app_server_endpoint=app_server_endpoint,
+                        bootstrap_prompt=prompts[role.id],
+                    ),
+                )
+            )
             pane_id = _single_field(
                 _checked(
                     execute,
-                    [
-                        tmux,
-                        "split-window",
-                        "-h",
-                        "-d",
-                        "-P",
-                        "-F",
-                        "#{pane_id}",
-                        "-t",
-                        pane_ids[-1],
-                        "-c",
-                        str(project),
-                        _codex_command(
-                            codex,
-                            role.runtime_profile,
-                            project,
-                            app_server_endpoint=app_server_endpoint,
-                            bootstrap_prompt=prompts[role.id],
-                        ),
-                    ],
+                    split_command,
                     f"failed to create the {role.id} pane",
                 ).stdout,
                 f"tmux split-window for {role.id}",
             )
             pane_ids.append(pane_id)
+            pane_by_role[role.id] = pane_id
 
-        _checked(
-            execute,
-            [tmux, "select-layout", "-t", window_id, package.layout.name],
-            f"failed to apply tmux layout {package.layout.name!r}",
-        )
+        if isinstance(package.layout, EvenHorizontalTmuxLayout):
+            _checked(
+                execute,
+                [tmux, "select-layout", "-t", window_id, package.layout.name],
+                f"failed to apply tmux layout {package.layout.name!r}",
+            )
     except Exception as error:
         if window_id is not None:
             _run_ignoring_failure(execute, [tmux, "kill-window", "-t", window_id])

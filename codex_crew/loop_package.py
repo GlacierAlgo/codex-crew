@@ -35,10 +35,27 @@ class LoopRole:
 
 
 @dataclass(frozen=True)
-class TmuxLayout:
+class EvenHorizontalTmuxLayout:
     name: str
     columns: int
     equal_width: bool
+
+
+@dataclass(frozen=True)
+class TmuxSplitStep:
+    role: str
+    target: str
+    direction: str
+    percentage: int
+
+
+@dataclass(frozen=True)
+class SplitPlanTmuxLayout:
+    name: str
+    steps: tuple[TmuxSplitStep, ...]
+
+
+TmuxLayout = EvenHorizontalTmuxLayout | SplitPlanTmuxLayout
 
 
 @dataclass(frozen=True)
@@ -244,15 +261,6 @@ def _load_manifest(path: Path) -> LoopPackage:
         )
 
     layout_table = _required_table(document, "tmux", path)
-    layout_name = _required_string(layout_table, "layout", path)
-    columns = layout_table.get("columns")
-    equal_width = layout_table.get("equal_width")
-    if layout_name != "even-horizontal" or equal_width is not True:
-        raise LoopPackageError(
-            f"{path}: tmux layout must be even-horizontal with equal_width=true"
-        )
-    if isinstance(columns, bool) or not isinstance(columns, int) or columns < 2:
-        raise LoopPackageError(f"{path}: tmux columns must be an integer >= 2")
 
     raw_roles = document.get("roles")
     if not isinstance(raw_roles, list) or not raw_roles:
@@ -297,10 +305,7 @@ def _load_manifest(path: Path) -> LoopPackage:
             f"{path}: communication_role {communication_role!r} must reference "
             "exactly one ordered role"
         )
-    if columns != len(roles):
-        raise LoopPackageError(
-            f"{path}: tmux columns ({columns}) must equal role count ({len(roles)})"
-        )
+    layout = _parse_tmux_layout(layout_table, role_ids=role_ids, source=path)
 
     return LoopPackage(
         id=loop_id,
@@ -309,12 +314,100 @@ def _load_manifest(path: Path) -> LoopPackage:
         manual_path=manual,
         roles=tuple(roles),
         communication_role=communication_role,
-        layout=TmuxLayout(
+        layout=layout,
+    )
+
+
+def _parse_tmux_layout(
+    values: Mapping[str, Any], *, role_ids: list[str], source: Path
+) -> TmuxLayout:
+    layout_name = _required_string(values, "layout", source)
+    if layout_name == "even-horizontal":
+        if "steps" in values:
+            raise LoopPackageError(
+                f"{source}: even-horizontal tmux layout must not declare split steps"
+            )
+        columns = values.get("columns")
+        equal_width = values.get("equal_width")
+        if equal_width is not True:
+            raise LoopPackageError(
+                f"{source}: even-horizontal tmux layout requires equal_width=true"
+            )
+        if isinstance(columns, bool) or not isinstance(columns, int) or columns < 2:
+            raise LoopPackageError(
+                f"{source}: tmux columns must be an integer >= 2"
+            )
+        if columns != len(role_ids):
+            raise LoopPackageError(
+                f"{source}: tmux columns ({columns}) must equal role count "
+                f"({len(role_ids)})"
+            )
+        return EvenHorizontalTmuxLayout(
             name=layout_name,
             columns=columns,
             equal_width=equal_width,
-        ),
-    )
+        )
+
+    if layout_name != "split-plan":
+        raise LoopPackageError(f"{source}: unsupported tmux layout {layout_name!r}")
+    if "columns" in values or "equal_width" in values:
+        raise LoopPackageError(
+            f"{source}: split-plan tmux layout must not declare columns or equal_width"
+        )
+    raw_steps = values.get("steps")
+    if not isinstance(raw_steps, list):
+        raise LoopPackageError(
+            f"{source}: split-plan tmux steps must be an ordered array"
+        )
+    expected_count = len(role_ids) - 1
+    if len(raw_steps) != expected_count:
+        raise LoopPackageError(
+            f"{source}: split-plan tmux steps ({len(raw_steps)}) must cover "
+            f"every non-root role ({expected_count})"
+        )
+
+    steps: list[TmuxSplitStep] = []
+    for index, raw_step in enumerate(raw_steps):
+        if not isinstance(raw_step, Mapping):
+            raise LoopPackageError(f"{source}: tmux steps[{index}] must be a table")
+        role = _required_string(raw_step, "role", source)
+        expected_role = role_ids[index + 1]
+        if role != expected_role:
+            raise LoopPackageError(
+                f"{source}: tmux steps[{index}] role {role!r} must create "
+                f"ordered role {expected_role!r}"
+            )
+        target = _required_string(raw_step, "target", source)
+        earlier_roles = role_ids[: index + 1]
+        if target not in earlier_roles:
+            raise LoopPackageError(
+                f"{source}: tmux steps[{index}] target {target!r} must reference "
+                "an earlier role"
+            )
+        direction = _required_string(raw_step, "direction", source)
+        if direction not in {"horizontal", "vertical"}:
+            raise LoopPackageError(
+                f"{source}: tmux steps[{index}] direction must be horizontal or vertical"
+            )
+        percentage = raw_step.get("percentage")
+        if (
+            isinstance(percentage, bool)
+            or not isinstance(percentage, int)
+            or not 1 <= percentage <= 99
+        ):
+            raise LoopPackageError(
+                f"{source}: tmux steps[{index}] percentage must be an integer "
+                "from 1 through 99"
+            )
+        steps.append(
+            TmuxSplitStep(
+                role=role,
+                target=target,
+                direction=direction,
+                percentage=percentage,
+            )
+        )
+    return SplitPlanTmuxLayout(name=layout_name, steps=tuple(steps))
 
 
 def _loops_root(value: str | Path | None) -> Path:

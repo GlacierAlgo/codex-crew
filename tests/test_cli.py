@@ -22,10 +22,11 @@ def _launch_result(
     loop_id: str = "three-agent-dev",
     roles: tuple[str, ...] = ("commander", "worker", "judger"),
     communication_role: str = "commander",
+    layout: str = "even-horizontal",
 ) -> CrewLaunch:
     return CrewLaunch(
         loop_id=loop_id,
-        layout="even-horizontal",
+        layout=layout,
         app_server_endpoint=endpoint,
         session="default",
         window_id="@7",
@@ -84,13 +85,14 @@ class ClickCliTests(unittest.TestCase):
             "unix:///repo/.codex-crew/runtime/app-server.sock",
             loop_id="api-budget-design",
             roles=(
-                "coordinator",
-                "designer_3",
-                "designer_4",
-                "designer_5",
-                "designer_6",
+                "commander",
+                "worker_3",
+                "worker_4",
+                "worker_5",
+                "worker_6",
             ),
-            communication_role="coordinator",
+            communication_role="commander",
+            layout="split-plan",
         )
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory) / "target"
@@ -200,19 +202,19 @@ class ClickCliTests(unittest.TestCase):
         self.assertEqual("commander", packages["three-agent-dev"]["communication_role"])
         self.assertEqual(
             [
-                "coordinator",
-                "designer_3",
-                "designer_4",
-                "designer_5",
-                "designer_6",
+                "commander",
+                "worker_3",
+                "worker_4",
+                "worker_5",
+                "worker_6",
             ],
             packages["api-budget-design"]["roles"],
         )
         self.assertEqual(
-            "coordinator", packages["api-budget-design"]["communication_role"]
+            "commander", packages["api-budget-design"]["communication_role"]
         )
         self.assertEqual("even-horizontal", packages["three-agent-dev"]["layout"])
-        self.assertEqual("even-horizontal", packages["api-budget-design"]["layout"])
+        self.assertEqual("split-plan", packages["api-budget-design"]["layout"])
 
     @patch("codex_crew.cli.launch_crew")
     def test_launch_defaults_to_unix_app_server_and_exposes_thread_mapping(
@@ -284,17 +286,18 @@ class ClickCliTests(unittest.TestCase):
     @patch("codex_crew.cli.up_crew")
     def test_up_accepts_explicit_five_role_api_budget_loop(self, up_mock) -> None:
         roles = (
-            "coordinator",
-            "designer_3",
-            "designer_4",
-            "designer_5",
-            "designer_6",
+            "commander",
+            "worker_3",
+            "worker_4",
+            "worker_5",
+            "worker_6",
         )
         up_mock.return_value = _launch_result(
             "unix:///repo/.codex-crew/runtime/app-server.sock",
             loop_id="api-budget-design",
             roles=roles,
-            communication_role="coordinator",
+            communication_role="commander",
+            layout="split-plan",
         )
         result = CliRunner().invoke(
             cli,
@@ -314,8 +317,8 @@ class ClickCliTests(unittest.TestCase):
             {role: f"thread-{role}" for role in roles},
             payload["thread_mapping"],
         )
-        self.assertEqual("coordinator", payload["communication_role"])
-        self.assertEqual("thread-coordinator", payload["communication_thread_id"])
+        self.assertEqual("commander", payload["communication_role"])
+        self.assertEqual("thread-commander", payload["communication_thread_id"])
         self.assertEqual(
             {"fast"}, {pane["service_tier"] for pane in payload["panes"]}
         )

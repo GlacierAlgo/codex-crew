@@ -1,49 +1,71 @@
 schema_version = 2
 id = "api-budget-design"
 manual = "loop.md"
-communication_role = "coordinator"
+communication_role = "commander"
 
 [tmux]
-layout = "even-horizontal"
-columns = 5
-equal_width = true
+layout = "split-plan"
+
+[[tmux.steps]]
+role = "worker_3"
+target = "commander"
+direction = "horizontal"
+percentage = 67
+
+[[tmux.steps]]
+role = "worker_4"
+target = "worker_3"
+direction = "vertical"
+percentage = 50
+
+[[tmux.steps]]
+role = "worker_5"
+target = "worker_3"
+direction = "horizontal"
+percentage = 50
+
+[[tmux.steps]]
+role = "worker_6"
+target = "worker_4"
+direction = "horizontal"
+percentage = 50
 
 [[roles]]
-id = "coordinator"
-instructions = "coordinator.md"
-runtime_profile = "codex-crew-api-budget-design-coordinator"
+id = "commander"
+instructions = "commander.md"
+runtime_profile = "codex-crew-api-budget-design-commander"
 model = "gpt-5.6-sol"
 reasoning_effort = "high"
 service_tier = "fast"
 
 [[roles]]
-id = "designer_3"
-instructions = "designer_3.md"
-runtime_profile = "codex-crew-api-budget-design-designer-3"
+id = "worker_3"
+instructions = "worker_3.md"
+runtime_profile = "codex-crew-api-budget-design-worker-3"
 model = "gpt-5.6-sol"
 reasoning_effort = "high"
 service_tier = "fast"
 
 [[roles]]
-id = "designer_4"
-instructions = "designer_4.md"
-runtime_profile = "codex-crew-api-budget-design-designer-4"
+id = "worker_4"
+instructions = "worker_4.md"
+runtime_profile = "codex-crew-api-budget-design-worker-4"
 model = "gpt-5.6-sol"
 reasoning_effort = "high"
 service_tier = "fast"
 
 [[roles]]
-id = "designer_5"
-instructions = "designer_5.md"
-runtime_profile = "codex-crew-api-budget-design-designer-5"
+id = "worker_5"
+instructions = "worker_5.md"
+runtime_profile = "codex-crew-api-budget-design-worker-5"
 model = "gpt-5.6-sol"
 reasoning_effort = "high"
 service_tier = "fast"
 
 [[roles]]
-id = "designer_6"
-instructions = "designer_6.md"
-runtime_profile = "codex-crew-api-budget-design-designer-6"
+id = "worker_6"
+instructions = "worker_6.md"
+runtime_profile = "codex-crew-api-budget-design-worker-6"
 model = "gpt-5.6-sol"
 reasoning_effort = "high"
 service_tier = "fast"

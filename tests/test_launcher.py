@@ -199,7 +199,7 @@ class FakeRunner:
         self.state = state
         self.calls: list[tuple[str, ...]] = []
         self.fail_first_split = fail_first_split
-        self.horizontal_splits = 0
+        self.split_count = 0
 
     def __call__(self, command) -> subprocess.CompletedProcess[str]:
         command = tuple(command)
@@ -213,11 +213,11 @@ class FakeRunner:
             self.state.add_from_command(command[-1])
             return _completed(command, stdout="@7\t%10\t6\n")
         if operation == "split-window":
-            self.horizontal_splits += 1
-            if self.fail_first_split and self.horizontal_splits == 1:
+            self.split_count += 1
+            if self.fail_first_split and self.split_count == 1:
                 return _completed(command, returncode=1, stderr="no space")
             self.state.add_from_command(command[-1])
-            return _completed(command, stdout=f"%{10 + self.horizontal_splits}\n")
+            return _completed(command, stdout=f"%{10 + self.split_count}\n")
         if operation in {"select-layout", "kill-window"}:
             return _completed(command)
         raise AssertionError(f"unexpected command: {command}")
@@ -344,7 +344,7 @@ class LauncherTests(unittest.TestCase):
         ):
             self.assertIn(expected, handoff_message)
 
-    def test_api_budget_launch_creates_five_committed_equal_width_roles(self) -> None:
+    def test_api_budget_launch_executes_manifest_split_plan(self) -> None:
         state = DiscoveryState()
         runner = FakeRunner(state)
         with tempfile.TemporaryDirectory() as directory:
@@ -366,39 +366,39 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(
             f"crew-api-budget-design-{project.name}", result.window_name
         )
-        self.assertEqual("even-horizontal", result.layout)
+        self.assertEqual("split-plan", result.layout)
         self.assertEqual(
             {
-                "coordinator": "thread-coordinator",
-                "designer_3": "thread-designer_3",
-                "designer_4": "thread-designer_4",
-                "designer_5": "thread-designer_5",
-                "designer_6": "thread-designer_6",
+                "commander": "thread-commander",
+                "worker_3": "thread-worker_3",
+                "worker_4": "thread-worker_4",
+                "worker_5": "thread-worker_5",
+                "worker_6": "thread-worker_6",
             },
             result.thread_mapping,
         )
         self.assertEqual(
             {
-                "coordinator": "%10",
-                "designer_3": "%11",
-                "designer_4": "%12",
-                "designer_5": "%13",
-                "designer_6": "%14",
+                "commander": "%10",
+                "worker_3": "%11",
+                "worker_4": "%12",
+                "worker_5": "%13",
+                "worker_6": "%14",
             },
             result.pane_mapping,
         )
         self.assertEqual(5, len(result.panes))
-        self.assertEqual("coordinator", result.communication_role)
-        self.assertEqual("thread-coordinator", result.communication_thread_id)
+        self.assertEqual("commander", result.communication_role)
+        self.assertEqual("thread-commander", result.communication_thread_id)
         self.assertEqual("%10", result.communication_pane_id)
-        self.assertEqual("turn-handoff-coordinator", result.handoff_turn_id)
+        self.assertEqual("turn-handoff-commander", result.handoff_turn_id)
         self.assertEqual({"high"}, {pane.reasoning_effort for pane in result.panes})
         self.assertEqual({"fast"}, {pane.service_tier for pane in result.panes})
         self.assertEqual(
             {"fast"},
             {pane["service_tier"] for pane in result.as_dict()["panes"]},
         )
-        self.assertEqual(4, runner.horizontal_splits)
+        self.assertEqual(4, runner.split_count)
         self.assertEqual(
             1,
             sum(command[1] == "new-window" for command in runner.calls),
@@ -414,9 +414,31 @@ class LauncherTests(unittest.TestCase):
             self.assertEqual(
                 f"role={pane.role}", turn["items"][-1]["text"].splitlines()[0]
             )
-        self.assertIn(
-            ("/tmux", "select-layout", "-t", "@7", "even-horizontal"),
-            runner.calls,
+        split_commands = [
+            command for command in runner.calls if command[1] == "split-window"
+        ]
+        self.assertEqual(
+            [
+                ("-h", "67", "%10"),
+                ("-v", "50", "%11"),
+                ("-h", "50", "%11"),
+                ("-h", "50", "%12"),
+            ],
+            [
+                (
+                    command[2],
+                    command[command.index("-p") + 1],
+                    command[command.index("-t") + 1],
+                )
+                for command in split_commands
+            ],
+        )
+        for command in split_commands:
+            self.assertEqual(
+                ("-d", "-P", "-F", "#{pane_id}"), command[5:9]
+            )
+        self.assertFalse(
+            any(command[1] == "select-layout" for command in runner.calls)
         )
 
     def test_communication_handoff_failure_is_nonzero_and_preserves_window(self) -> None:

@@ -75,12 +75,35 @@ PID。
   `handoff_turn_id` / `handoff_status`；
 - `lifecycle_record_path` 与 exact `close_command`。
 
+## Loop package public surface
+
+本文中的 **loop package** 是 repository-owned artifact：`loops/<loop-id>/` 目录及其中的
+`manifest.toml`、`loop.md` 和 role instruction Markdown；`package` 不是 CLI subcommand，
+因此不存在 `codex-crew loop package`。公开 CLI surface 只有以下三个 verbs：
+
+```bash
+# 发现 packages，并查看 roles、runtime profiles、communication_role 与 layout
+./bin/codex-crew loop list
+./bin/codex-crew loop list --json
+
+# 从指定 package authority 安装 repo-derived profile adapters
+./bin/codex-crew loop install api-budget-design
+
+# 校验 package sources 与已安装 adapters 一致
+./bin/codex-crew loop check api-budget-design
+```
+
+因此，“package/list/install/check”表示“canonical loop package artifact，以及用于发现、安装、
+校验它的 `loop list`、`loop install LOOP_ID`、`loop check LOOP_ID`”，不是四个并列的 CLI
+subcommands。`api-budget-design` 的 public role order、profiles、`communication_role` 与
+`split-plan` contract 可由 `loop list --json` 直接观察；`install`/`check` 的成功输出则列出
+同一 ordered role/profile mapping。
+
 ## One communication thread per loop
 
 每个 manifest 必须且只能声明一个 `communication_role`。启动成功后，用户只与 JSON 中的
 `communication_thread_id` 对应 TUI（也就是 `communication_pane_id`）交互；其他 roles 是
-由它控制的 sub-threads，不直接承担用户沟通。默认 loop 使用 Commander，API-budget loop
-使用 Coordinator。
+由它控制的 sub-threads，不直接承担用户沟通。两个当前 loop 都使用 Commander。
 
 Automatic runtime handoff 在 launch 返回前完成。它包含 loop/project/session、exact
 window metadata、explicit endpoint 与 ordered role -> exact pane/thread/bootstrap-turn
@@ -151,13 +174,13 @@ deprecated，并推荐 [skills](https://developers.openai.com/codex/skills)。Cu
 该 prompt。若未来需要 inside-Codex ergonomic entrypoint，应实现 skill 且仅准备/展示
 external close command，transaction 仍由 lifecycle CLI 执行。
 
-## Four-way API-budget design with Coordinator
+## Four-way API-budget design with Commander
 
 `api-budget-design` 是 optional loop，只在用户明确选择它，或明确要求比较 `N=3/4/5/6`
 四种 API-budget 设计时使用。它用同一 `gpt-5.6-sol` model、`high` reasoning effort 与
-Fast service tier 启动五个隔离 roles：`coordinator`、`designer_3`、`designer_4`、
-`designer_5`、`designer_6`。Coordinator 是唯一 communication role；四个 designers 是
-sub-threads。designer 的唯一实验变量是 `N`：恰好 `N` 个 counted deep modules，且恰好
+Fast service tier 启动五个隔离 roles：`commander`、`worker_3`、`worker_4`、
+`worker_5`、`worker_6`。Commander 是唯一 communication role；四个 Workers 是
+sub-threads。Worker 的唯一实验变量是 `N`：恰好 `N` 个 counted deep modules，且恰好
 `N` 个顶层 public APIs。
 
 ```bash
@@ -167,35 +190,41 @@ sub-threads。designer 的唯一实验变量是 `N`：恰好 `N` 个 counted dee
 成功 JSON 的 `thread_mapping` 固定包含：
 
 ```text
-coordinator -> exact native communication thread_id
-designer_3 -> exact native thread_id for N=3
-designer_4 -> exact native thread_id for N=4
-designer_5 -> exact native thread_id for N=5
-designer_6 -> exact native thread_id for N=6
+commander -> exact native communication thread_id
+worker_3 -> exact native thread_id for N=3
+worker_4 -> exact native thread_id for N=4
+worker_5 -> exact native thread_id for N=5
+worker_6 -> exact native thread_id for N=6
 ```
 
-用户启动后只在 Coordinator pane/thread 输入原始 new-build 或 migration request。
-Coordinator 自己把 byte-identical request 分发给四个 designer threads，不注入 `N` 或
-runtime handoff；operator 不再手工构造 comparison input。四个 designer contexts/output
+manifest 的 ordered split plan 创建三列近似等宽的 `[1,2,2]` geometry：左列
+`commander` full height；中列上/下为 `worker_3`/`worker_4`；右列上/下为
+`worker_5`/`worker_6`，即“左1/中23/右45”。split plan 使用 target role、
+`horizontal`/`vertical` direction 与 percentage 静态定义，不经过会重排 geometry 的
+`select-layout`。
+
+用户启动后只在 Commander pane/thread 输入原始 new-build 或 migration request。
+Commander 自己把 byte-identical request 分发给四个 Worker threads，不注入 `N` 或
+runtime handoff；operator 不再手工构造 comparison input。四个 Worker contexts/output
 互相隔离。每份 final 使用相同
 output contract：`Assumptions`、`Module map / Deep modules (exactly N)`、
 `Public APIs (exactly N)`、
 `Main sequential flows`、`New-build path` 或 `Migration path`、
 `Discarded abstractions and tradeoffs`、`Budget audit`。最后一节必须报告
 `deep_modules=N/N` 与 `public_apis=N/N`，并将每个 `N` 替换为当前 role 的数值 budget。
-任一 module/API count 不匹配的 designer final 均不合规，不得作为 recommendation
+任一 module/API count 不匹配的 Worker final 均不合规，不得作为 recommendation
 candidate。
 
-Language contract：四个 Designer 的所有 user-facing design output 必须使用中文句法；
-Coordinator 的 comparison output 遵循相同要求。
+Language contract：四个 Worker 的所有 user-facing design output 必须使用中文句法；
+Commander 的 comparison output 遵循相同要求。
 technical identifier、API、module、contract、CLI、schema、file path、error text 与标准
 technical term 保留 English 原名，并自然混排在中文句法中。不要附加逐段或整篇
 English translation。
 
-Coordinator 收齐四份 authoritative final `agentMessage` 后，机械计算每份 final 的顶层
+Commander 收齐四份 authoritative final `agentMessage` 后，机械计算每份 final 的顶层
 numbered module/API entries，并核对 numeric
 `deep_modules=N/N` 与 `public_apis=N/N` audit；只比较合规方案。最终 comparison 清楚列出
-每个合规 `N` 强制产生的结构决策、取舍、风险与 recommendation，不补写或修复 designer
+每个合规 `N` 强制产生的结构决策、取舍、风险与 recommendation，不补写或修复 Worker
 方案，也不修改 target worktree。它随后报告本轮 metrics 并等待用户下一步。
 
 ## Repository and runtime boundary

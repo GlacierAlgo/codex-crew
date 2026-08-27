@@ -5,7 +5,9 @@ import tempfile
 import unittest
 
 from codex_crew.loop_package import (
+    EvenHorizontalTmuxLayout,
     LoopPackageError,
+    SplitPlanTmuxLayout,
     check_loop_installation,
     discover_loop_packages,
     install_loop_package,
@@ -35,6 +37,7 @@ class LoopPackageTests(unittest.TestCase):
                 self.assertIn('service_tier = "fast"\n', adapter)
 
         package = load_loop_package("three-agent-dev")
+        self.assertIsInstance(package.layout, EvenHorizontalTmuxLayout)
         self.assertEqual("loop.md", package.manual_path.name)
         self.assertEqual("even-horizontal", package.layout.name)
         self.assertTrue(package.layout.equal_width)
@@ -170,24 +173,172 @@ service_tier = "fast"
                 with self.assertRaisesRegex(LoopPackageError, expected):
                     load_loop_package("test-loop", loops_dir=loops_root)
 
+    def test_split_plan_rejects_invalid_or_non_acyclic_steps(self) -> None:
+        variants = {
+            "incomplete": (
+                """[[tmux.steps]]
+role = "role_b"
+target = "role_a"
+direction = "horizontal"
+percentage = 50
+""",
+                "must cover every non-root role",
+            ),
+            "forward": (
+                """[[tmux.steps]]
+role = "role_b"
+target = "role_c"
+direction = "horizontal"
+percentage = 50
+
+[[tmux.steps]]
+role = "role_c"
+target = "role_a"
+direction = "vertical"
+percentage = 50
+""",
+                "must reference an earlier role",
+            ),
+            "cyclic": (
+                """[[tmux.steps]]
+role = "role_b"
+target = "role_c"
+direction = "horizontal"
+percentage = 50
+
+[[tmux.steps]]
+role = "role_c"
+target = "role_b"
+direction = "vertical"
+percentage = 50
+""",
+                "must reference an earlier role",
+            ),
+            "wrong-order": (
+                """[[tmux.steps]]
+role = "role_c"
+target = "role_a"
+direction = "horizontal"
+percentage = 50
+
+[[tmux.steps]]
+role = "role_b"
+target = "role_a"
+direction = "vertical"
+percentage = 50
+""",
+                "must create ordered role",
+            ),
+            "invalid-direction": (
+                """[[tmux.steps]]
+role = "role_b"
+target = "role_a"
+direction = "diagonal"
+percentage = 50
+
+[[tmux.steps]]
+role = "role_c"
+target = "role_b"
+direction = "vertical"
+percentage = 50
+""",
+                "direction must be horizontal or vertical",
+            ),
+            "invalid-percentage": (
+                """[[tmux.steps]]
+role = "role_b"
+target = "role_a"
+direction = "horizontal"
+percentage = 100
+
+[[tmux.steps]]
+role = "role_c"
+target = "role_b"
+direction = "vertical"
+percentage = 50
+""",
+                "percentage must be an integer from 1 through 99",
+            ),
+        }
+        roles = """
+[[roles]]
+id = "role_a"
+instructions = "role.md"
+runtime_profile = "test-loop-role-a"
+model = "gpt-5.6-sol"
+reasoning_effort = "high"
+service_tier = "fast"
+
+[[roles]]
+id = "role_b"
+instructions = "role.md"
+runtime_profile = "test-loop-role-b"
+model = "gpt-5.6-sol"
+reasoning_effort = "high"
+service_tier = "fast"
+
+[[roles]]
+id = "role_c"
+instructions = "role.md"
+runtime_profile = "test-loop-role-c"
+model = "gpt-5.6-sol"
+reasoning_effort = "high"
+service_tier = "fast"
+"""
+        for label, (steps, expected) in variants.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                loops_root = Path(directory)
+                package_root = loops_root / "test-loop"
+                package_root.mkdir()
+                (package_root / "loop.md").write_text("# Test loop\n", encoding="utf-8")
+                (package_root / "role.md").write_text("Test role.\n", encoding="utf-8")
+                (package_root / "manifest.toml").write_text(
+                    """schema_version = 2
+id = "test-loop"
+manual = "loop.md"
+communication_role = "role_a"
+
+[tmux]
+layout = "split-plan"
+
+"""
+                    + steps
+                    + roles,
+                    encoding="utf-8",
+                )
+
+                with self.assertRaisesRegex(LoopPackageError, expected):
+                    load_loop_package("test-loop", loops_dir=loops_root)
+
     def test_api_budget_design_is_a_five_role_exact_budget_package(self) -> None:
         package = load_loop_package("api-budget-design")
 
-        self.assertEqual("even-horizontal", package.layout.name)
-        self.assertTrue(package.layout.equal_width)
-        self.assertEqual(5, package.layout.columns)
-        self.assertEqual("coordinator", package.communication_role)
+        self.assertIsInstance(package.layout, SplitPlanTmuxLayout)
+        self.assertEqual("split-plan", package.layout.name)
         self.assertEqual(
-            ["coordinator", "designer_3", "designer_4", "designer_5", "designer_6"],
+            [
+                ("worker_3", "commander", "horizontal", 67),
+                ("worker_4", "worker_3", "vertical", 50),
+                ("worker_5", "worker_3", "horizontal", 50),
+                ("worker_6", "worker_4", "horizontal", 50),
+            ],
+            [
+                (step.role, step.target, step.direction, step.percentage)
+                for step in package.layout.steps
+            ],
+        )
+        self.assertEqual("commander", package.communication_role)
+        self.assertEqual(
+            ["commander", "worker_3", "worker_4", "worker_5", "worker_6"],
             [role.id for role in package.roles],
         )
         self.assertEqual(
             [
-                "codex-crew-api-budget-design-coordinator",
-                "codex-crew-api-budget-design-designer-3",
-                "codex-crew-api-budget-design-designer-4",
-                "codex-crew-api-budget-design-designer-5",
-                "codex-crew-api-budget-design-designer-6",
+                "codex-crew-api-budget-design-commander",
+                "codex-crew-api-budget-design-worker-3",
+                "codex-crew-api-budget-design-worker-4",
+                "codex-crew-api-budget-design-worker-5",
+                "codex-crew-api-budget-design-worker-6",
             ],
             [role.runtime_profile for role in package.roles],
         )
@@ -201,10 +352,10 @@ service_tier = "fast"
             "technical identifier、API、module、contract、CLI、schema、file path、error text",
             "不要附加逐段或整篇 English translation",
         )
-        designer_instructions = []
+        worker_instructions = []
         for budget, role in zip(range(3, 7), package.roles[1:], strict=True):
             instructions = role.instructions_path.read_text(encoding="utf-8")
-            designer_instructions.append(instructions)
+            worker_instructions.append(instructions)
             self.assertEqual(1, instructions.count(f"N={budget}"))
             normalized_instructions.add(
                 instructions.replace(f"N={budget}", "N=<budget>")
@@ -227,7 +378,7 @@ service_tier = "fast"
             self.assertIn("public_apis=N/N", instructions)
         self.assertEqual(1, len(normalized_instructions))
 
-        coordinator = package.roles[0].instructions_path.read_text(encoding="utf-8")
+        commander = package.roles[0].instructions_path.read_text(encoding="utf-8")
         for requirement in (
             "only user-facing communication role",
             "runtime control envelope",
@@ -243,19 +394,29 @@ service_tier = "fast"
             "Do not start another round",
             "Do not read from or modify the target worktree",
         ):
-            self.assertIn(requirement, coordinator)
+            self.assertIn(requirement, commander)
 
         root = Path(__file__).resolve().parents[1]
         public_contracts = (
             package.manual_path.read_text(encoding="utf-8"),
             (root / "README.md").read_text(encoding="utf-8"),
         )
+        readme = public_contracts[1]
+        for requirement in (
+            "loop package** 是 repository-owned artifact",
+            "`package` 不是 CLI subcommand",
+            "不存在 `codex-crew loop package`",
+            "./bin/codex-crew loop list --json",
+            "./bin/codex-crew loop install api-budget-design",
+            "./bin/codex-crew loop check api-budget-design",
+        ):
+            self.assertIn(requirement, readme)
         for contract in public_contracts:
             normalized_contract = " ".join(contract.split())
             for requirement in language_contract:
                 self.assertIn(requirement, normalized_contract)
 
-        budget_contracts = (*designer_instructions, coordinator, *public_contracts)
+        budget_contracts = (*worker_instructions, commander, *public_contracts)
         forbidden_budget_phrases = (
             "at " "most N deep modules",
             "K <" "= N",
@@ -267,9 +428,9 @@ service_tier = "fast"
 
         for contract in public_contracts:
             for requirement in (
-                "designer_3 ->",
-                "designer_6 ->",
-                "coordinator ->",
+                "worker_3 ->",
+                "worker_6 ->",
+                "commander ->",
                 "communication role",
                 "runtime handoff",
             ):
@@ -304,21 +465,38 @@ service_tier = "fast"
             self.assertNotIn(forbidden, manual)
         self.assertNotIn("codex app-server --listen", manual)
         self.assertNotIn("@codex_crew_transport", manual)
-        self.assertNotIn("--window", manual)
-        self.assertNotIn("--role", manual)
-        self.assertIn("--endpoint", manual)
-        self.assertIn("--thread-id", manual)
-        for command in (
+        external_close_command = "`codex-crew crew close --window-id @N`"
+        self.assertEqual(1, manual.count(external_close_command))
+        native_dispatch = manual.split(
+            "之后只有 Commander 接收用户 task/request。", 1
+        )[1].split("## One acceptance loop", 1)[0]
+        self.assertNotIn("--window", native_dispatch)
+        self.assertNotIn("--role", native_dispatch)
+        command_blocks = tuple(
+            part.split("```", 1)[0]
+            for part in native_dispatch.split("```bash\n")[1:]
+        )
+        commands = tuple(
+            line.strip()
+            for block in command_blocks
+            for line in block.replace("\\\n", "").splitlines()
+            if line.strip().startswith("codex-crew crew ")
+        )
+        expected_commands = (
             "crew status",
             "crew send",
-            "crew steer",
             "crew wait",
             "crew final",
+            "crew steer",
             "crew goal get",
             "crew goal set",
             "crew goal clear",
-        ):
-            self.assertIn(command, manual)
+        )
+        self.assertEqual(len(expected_commands), len(commands))
+        for expected, command in zip(expected_commands, commands, strict=True):
+            self.assertTrue(command.startswith(f"codex-crew {expected} "))
+            self.assertIn('--endpoint "$ENDPOINT"', command)
+            self.assertIn('--thread-id "$WORKER_THREAD"', command)
         self.assertIn("tmux 只负责可视", manual)
         self.assertIn("Completion comes from `turn/completed`", manual)
 
@@ -398,6 +576,13 @@ service_tier = "fast"
 
     def test_install_removes_obsolete_managed_profile_after_role_migration(self) -> None:
         package = load_loop_package("api-budget-design")
+        obsolete_profiles = (
+            "codex-crew-api-budget-design-coordinator",
+            "codex-crew-api-budget-design-designer-3",
+            "codex-crew-api-budget-design-designer-4",
+            "codex-crew-api-budget-design-designer-5",
+            "codex-crew-api-budget-design-designer-6",
+        )
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             codex_home = root / "codex-home"
@@ -405,17 +590,18 @@ service_tier = "fast"
             install_loop_package(
                 package, codex_home=codex_home, managed_root=managed_root
             )
-            obsolete_adapter = (
-                managed_root
-                / package.id
-                / "codex-crew-api-budget-design-old-role.config.toml"
-            )
-            obsolete_adapter.write_text(
-                "# @generated by codex-crew loop adapter v1\nold\n",
-                encoding="utf-8",
-            )
-            obsolete_symlink = codex_home / obsolete_adapter.name
-            obsolete_symlink.symlink_to(obsolete_adapter)
+            obsolete_adapters = []
+            for profile in obsolete_profiles:
+                obsolete_adapter = (
+                    managed_root / package.id / f"{profile}.config.toml"
+                )
+                obsolete_adapter.write_text(
+                    "# @generated by codex-crew loop adapter v1\nold\n",
+                    encoding="utf-8",
+                )
+                obsolete_symlink = codex_home / obsolete_adapter.name
+                obsolete_symlink.symlink_to(obsolete_adapter)
+                obsolete_adapters.append((obsolete_adapter, obsolete_symlink))
 
             with self.assertRaisesRegex(
                 LoopPackageError, "obsolete managed adapters remain"
@@ -427,8 +613,9 @@ service_tier = "fast"
                 package, codex_home=codex_home, managed_root=managed_root
             )
 
-            self.assertFalse(obsolete_adapter.exists())
-            self.assertFalse(obsolete_symlink.is_symlink())
+            for obsolete_adapter, obsolete_symlink in obsolete_adapters:
+                self.assertFalse(obsolete_adapter.exists())
+                self.assertFalse(obsolete_symlink.is_symlink())
             self.assertEqual(
                 5,
                 len(
