@@ -561,7 +561,8 @@ def _print_launch(result: CrewLaunch) -> None:
         detail = (
             f"{pane.role}: {pane.pane_id} "
             f"(profile={pane.runtime_profile}, model={pane.model}, "
-            f"reasoning_effort={pane.reasoning_effort})"
+            f"reasoning_effort={pane.reasoning_effort}, "
+            f"service_tier={pane.service_tier})"
         )
         detail += (
             f" thread={pane.thread_id} "

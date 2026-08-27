@@ -131,6 +131,7 @@ class LaunchRecorder:
                     runtime_profile=role.runtime_profile,
                     model=role.model,
                     reasoning_effort=role.reasoning_effort,
+                    service_tier=role.service_tier,
                     bootstrap_marker=f"marker-{role.id}",
                     thread_id=f"thread-{role.id}",
                     bootstrap_turn_id=f"turn-{role.id}",

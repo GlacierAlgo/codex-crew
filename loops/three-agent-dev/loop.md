@@ -2,8 +2,9 @@
 
 ## Runtime authority
 
-- `manifest.toml` 是 ordered roles、runtime profiles、model、reasoning effort 与
-  `even-horizontal` tmux layout 的唯一 runtime authority。
+- `manifest.toml` 是 ordered roles、runtime profiles、model、reasoning effort、
+  service tier 与 `even-horizontal` tmux layout 的唯一 runtime authority。三个 roles
+  固定使用 `gpt-5.6-sol`、`high` reasoning effort 与 Fast service tier。
 - 本 manual 定义协作流程；三个 package-local role Markdown 定义角色边界。
 - Launcher 在一个 tmux window 中启动三个 fresh profiled Codex TUI。tmux 只负责可视
   布局，不参与 dispatch、completion 或 identity resolution。
@@ -131,7 +132,8 @@ Evidence: exit status, stdout/stderr, responses/UI behavior, and public artifact
 - Only one Worker turn mutates the shared worktree at a time.
 - Judger never fixes findings and never reads beyond root README for product knowledge.
 - Commander never accepts without a fresh Judger `PASS`.
-- Role order is Commander、Worker、Judger; manifest remains profile/model/effort/layout authority.
+- Role order is Commander、Worker、Judger; manifest remains
+  profile/model/effort/service-tier/layout authority.
 - Every operation uses one explicit Unix endpoint plus one exact native `thread_id`.
 - `send` preserves one complete message; `steer` preserves exact turn precondition.
 - Completion comes from `turn/completed`; final comes from authoritative final `agentMessage`.

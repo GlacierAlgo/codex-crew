@@ -18,8 +18,23 @@ class LoopPackageTests(unittest.TestCase):
     def test_manifest_is_complete_runtime_authority(self) -> None:
         packages = discover_loop_packages()
 
-        self.assertEqual(["three-agent-dev"], [package.id for package in packages])
-        package = packages[0]
+        self.assertEqual(
+            ["api-budget-design", "three-agent-dev"],
+            [package.id for package in packages],
+        )
+        all_roles = tuple(role for package in packages for role in package.roles)
+        self.assertEqual(7, len(all_roles))
+        self.assertEqual({"gpt-5.6-sol"}, {role.model for role in all_roles})
+        self.assertEqual({"high"}, {role.reasoning_effort for role in all_roles})
+        self.assertEqual({"fast"}, {role.service_tier for role in all_roles})
+        for package in packages:
+            for role in package.roles:
+                adapter = render_profile_adapter(package, role)
+                self.assertIn('model = "gpt-5.6-sol"\n', adapter)
+                self.assertIn('model_reasoning_effort = "high"\n', adapter)
+                self.assertIn('service_tier = "fast"\n', adapter)
+
+        package = load_loop_package("three-agent-dev")
         self.assertEqual("loop.md", package.manual_path.name)
         self.assertEqual("even-horizontal", package.layout.name)
         self.assertTrue(package.layout.equal_width)
@@ -37,7 +52,130 @@ class LoopPackageTests(unittest.TestCase):
             [role.runtime_profile for role in package.roles],
         )
         self.assertEqual({"gpt-5.6-sol"}, {role.model for role in package.roles})
-        self.assertEqual({"xhigh"}, {role.reasoning_effort for role in package.roles})
+        self.assertEqual({"high"}, {role.reasoning_effort for role in package.roles})
+        self.assertEqual({"fast"}, {role.service_tier for role in package.roles})
+
+    def test_service_tier_is_required_nonempty_role_authority(self) -> None:
+        for label, service_tier_line in (
+            ("missing", ""),
+            ("empty", 'service_tier = ""\n'),
+        ):
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                loops_root = Path(directory)
+                package_root = loops_root / "test-loop"
+                package_root.mkdir()
+                (package_root / "loop.md").write_text("# Test loop\n", encoding="utf-8")
+                (package_root / "role.md").write_text("Test role.\n", encoding="utf-8")
+                (package_root / "manifest.toml").write_text(
+                    """schema_version = 1
+id = "test-loop"
+manual = "loop.md"
+
+[tmux]
+layout = "even-horizontal"
+columns = 2
+equal_width = true
+
+[[roles]]
+id = "role_a"
+instructions = "role.md"
+runtime_profile = "test-loop-role-a"
+model = "gpt-5.6-sol"
+reasoning_effort = "high"
+"""
+                    + service_tier_line
+                    + """
+[[roles]]
+id = "role_b"
+instructions = "role.md"
+runtime_profile = "test-loop-role-b"
+model = "gpt-5.6-sol"
+reasoning_effort = "high"
+service_tier = "fast"
+""",
+                    encoding="utf-8",
+                )
+
+                with self.assertRaisesRegex(
+                    LoopPackageError, "service_tier must be a non-empty string"
+                ):
+                    load_loop_package("test-loop", loops_dir=loops_root)
+
+    def test_api_budget_design_is_a_four_role_single_variable_package(self) -> None:
+        package = load_loop_package("api-budget-design")
+
+        self.assertEqual("even-horizontal", package.layout.name)
+        self.assertTrue(package.layout.equal_width)
+        self.assertEqual(4, package.layout.columns)
+        self.assertEqual(
+            ["designer_3", "designer_4", "designer_5", "designer_6"],
+            [role.id for role in package.roles],
+        )
+        self.assertEqual(
+            [
+                "codex-crew-api-budget-design-designer-3",
+                "codex-crew-api-budget-design-designer-4",
+                "codex-crew-api-budget-design-designer-5",
+                "codex-crew-api-budget-design-designer-6",
+            ],
+            [role.runtime_profile for role in package.roles],
+        )
+        self.assertEqual({"gpt-5.6-sol"}, {role.model for role in package.roles})
+        self.assertEqual({"high"}, {role.reasoning_effort for role in package.roles})
+        self.assertEqual({"fast"}, {role.service_tier for role in package.roles})
+
+        normalized_instructions = set()
+        language_contract = (
+            "user-facing design output 必须使用中文句法",
+            "technical identifier、API、module、contract、CLI、schema、file path、error text",
+            "不要附加逐段或整篇 English translation",
+        )
+        for budget, role in zip(range(3, 7), package.roles, strict=True):
+            instructions = role.instructions_path.read_text(encoding="utf-8")
+            self.assertEqual(1, instructions.count(f"N={budget}"))
+            normalized_instructions.add(
+                instructions.replace(f"N={budget}", "N=<budget>")
+            )
+            for heading in (
+                "Assumptions",
+                "Module map / Deep modules (K <= N)",
+                "Public APIs (exactly N)",
+                "Main sequential flows",
+                "New-build path",
+                "Migration path",
+                "Discarded abstractions and tradeoffs",
+                "Budget audit",
+            ):
+                self.assertIn(heading, instructions)
+            for requirement in language_contract:
+                self.assertIn(requirement, instructions)
+        self.assertEqual(1, len(normalized_instructions))
+
+        root = Path(__file__).resolve().parents[1]
+        public_contracts = (
+            package.manual_path.read_text(encoding="utf-8"),
+            (root / "README.md").read_text(encoding="utf-8"),
+        )
+        for contract in public_contracts:
+            normalized_contract = " ".join(contract.split())
+            for requirement in language_contract:
+                self.assertIn(requirement, normalized_contract)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            installed = install_loop_package(
+                package,
+                codex_home=root / "codex-home",
+                managed_root=root / "managed",
+            )
+            checked = check_loop_installation(
+                package,
+                codex_home=root / "codex-home",
+                managed_root=root / "managed",
+            )
+
+        self.assertEqual(installed, checked)
+        self.assertEqual(4, len(checked))
 
     def test_runtime_manual_uses_only_native_thread_control(self) -> None:
         manual = load_loop_package().manual_path.read_text(encoding="utf-8")
@@ -76,7 +214,7 @@ class LoopPackageTests(unittest.TestCase):
             *sorted((root / "codex_crew").glob("*.py")),
             root / "README.md",
             root / "DESIGN.md",
-            *sorted((root / "loops" / "three-agent-dev").glob("*.md")),
+            *sorted((root / "loops").glob("*/*.md")),
         ]
         production = "\n".join(
             path.read_text(encoding="utf-8") for path in production_paths

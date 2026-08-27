@@ -2,8 +2,9 @@
 
 ## Authorities
 
-`loops/index.md` 负责 loop routing；`loops/three-agent-dev/manifest.toml` 负责 ordered
-roles、runtime profiles、model、reasoning effort 与 tmux layout。Role Markdown 是唯一
+`loops/index.md` 负责 loop routing；所选 `loops/<loop-id>/manifest.toml` 分别负责该
+package 的 ordered roles、runtime profiles、model、reasoning effort、service tier 与
+tmux layout。`three-agent-dev` 仍是默认 loop。Package-local Role Markdown 是唯一
 editable instruction source，installed profile TOML 只是派生 adapter。
 
 Native `thread_id` 是 control identity。App Server 保存 thread/turn/item lifecycle；
@@ -11,7 +12,7 @@ codex-crew 不复制该 authority 到 SQLite 或 tmux。
 
 ```mermaid
 flowchart TD
-    MANIFEST["manifest.toml<br/>roles / profiles / layout"]
+    MANIFEST["manifest.toml<br/>roles / profile config / layout"]
     UP["up<br/>ordered startup gates"]
     PROFILES["repo generated profiles<br/>CODEX_HOME symlinks"]
     SESSION["exact tmux session<br/>reuse or create"]
@@ -71,19 +72,23 @@ canonical source. The tracked authorities remain `bin/`, `codex_crew/`, and `loo
    uses both sources, so neither may be excluded. Pagination and socket operations are bounded.
 3. Generate one launch nonce and one role-specific marker. Each pane starts a fresh Codex TUI:
    `--profile`, `--strict-config`, `--yolo`, `--remote`, `-C`, bootstrap prompt.
-4. Create one window, split twice horizontally, and apply `even-horizontal`. No tmux option is
-   a control-plane field.
+4. Create one window, split horizontally `role_count - 1` times, and apply `even-horizontal`.
+   The default `three-agent-dev` therefore splits twice; `api-budget-design` splits three times.
+   No tmux option is a control-plane field.
 5. Poll `thread/list`, subtract the pre-launch set, and `thread/read(includeTurns=true)` only the
    candidates. A correlation requires the exact marker line, exact `role=...` line, the
    `cwd`-filtered list, `turn.status=completed`, and an authoritative final-phase `agentMessage`
    whose first line exactly equals `role=<role>`.
-6. Return a `CrewLaunch` only after all three roles COMMIT. Deadline, `failed`, `interrupted`,
-   wrong identity, missing final, or ambiguous matches raise `LaunchError` with the exact window
-   ID and affected role. The CLI exits nonzero while preserving the visual window for diagnosis.
+6. Return a `CrewLaunch` only after every manifest-defined role COMMIT. For the default
+   `three-agent-dev` this remains all three roles; for `api-budget-design` it is all four designers.
+   Deadline, `failed`, `interrupted`, wrong identity, missing final, or ambiguous matches raise
+   `LaunchError` with the exact window ID and affected role. The CLI exits nonzero while preserving
+   the visual window for diagnosis.
 
-The production committed-identity deadline is 120 seconds, matching the expected risk envelope
-for three profiled xhigh bootstrap turns. Tests inject much smaller deadlines to exercise the same
-fail-closed path without weakening the production default.
+The production committed-identity deadline is 120 seconds for all manifest-defined profiled
+`high` reasoning, Fast service tier bootstrap turns. The default loop has three turns and the
+API-budget loop has four. Tests inject much smaller deadlines to exercise the same fail-closed path
+without weakening the production default.
 
 No `thread/start`, binding insert, or `codex resume` occurs before TUI startup. A tmux creation
 failure kills only the just-created window. Discovery failure after successful pane startup leaves

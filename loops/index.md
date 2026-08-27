@@ -21,3 +21,4 @@ symlink。
 | ID | Mode | Trigger | Source |
 | --- | --- | --- | --- |
 | `three-agent-dev` | `required` | 任何可能修改 worktree 的 development task | [`three-agent-dev/loop.md`](three-agent-dev/loop.md) |
+| `api-budget-design` | `optional` | 用户明确选择本 loop，或明确要求比较 `N=3/4/5/6` 的四种 API-budget 设计 | [`api-budget-design/loop.md`](api-budget-design/loop.md) |

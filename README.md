@@ -1,8 +1,9 @@
 # codex-crew
 
-`codex-crew` 在一个 tmux window 中启动 Commander、Worker、Judger 三个独立
-Codex TUI。tmux 只提供三列等宽的可视布局；所有派发、等待、final 与 goal 操作都
-直接使用 App Server native `thread_id`。
+`codex-crew` 按 repository-owned loop manifest 在一个 tmux window 中启动多个独立
+Codex TUI。tmux 只提供 manifest-defined 等宽可视布局；所有派发、等待、final 与 goal
+操作都直接使用 App Server native `thread_id`。默认 `three-agent-dev` 仍启动
+Commander、Worker、Judger 三列。
 
 ## One-click startup
 
@@ -12,16 +13,16 @@ Codex TUI。tmux 只提供三列等宽的可视布局；所有派发、等待、
 ./bin/codex-crew up /path/to/project --json
 ```
 
-`PROJECT_DIR` 省略时默认为当前目录；`--session` 默认是 `default`。`up` 在一次调用内
-严格依次完成：
+`PROJECT_DIR` 省略时默认为当前目录；`--session` 默认是 `default`，`--loop` 默认是
+`three-agent-dev`。`up` 在一次调用内严格依次完成：
 
-1. 从 `loops/three-agent-dev/manifest.toml` 加载唯一 runtime authority；
-2. 幂等生成并检查三个 repo-derived profile adapter；
+1. 从所选 `loops/<loop-id>/manifest.toml` 加载该 loop 的唯一 runtime authority；
+2. 按 manifest role count 幂等生成并检查 repo-derived profile adapters；
 3. 复用 exact tmux session，只有不存在时才运行
    `tmux new-session -d -s SESSION -c PROJECT_DIR`；
 4. 复用 ready 的 repo-owned App Server，否则 detached 启动并有界等待 readiness；
-5. 调用 native launcher，创建一个 window、三列等宽 pane，并等待三个 identity
-   bootstrap turn COMMIT。
+5. 调用 native launcher，创建一个 window、manifest-defined 等宽 panes，并等待全部
+   identity bootstrap turns COMMIT。
 
 任一 gate 失败都会非零退出，后续 gate 不会执行，也不会返回 partial launch JSON。
 `up` 不会杀已有 tmux session/window，也不会为失败的 App Server readiness 杀未知 live
@@ -30,10 +31,81 @@ PID。
 成功结果包含：
 
 - `window_id`、`window_index` 与 `pane_mapping`，只用于打开和查看布局；
-- `thread_mapping`，把 `commander`、`worker`、`judger` 映射到精确 native
-  `thread_id`；
+- `thread_mapping`，把所选 manifest 的每个 role 映射到精确 native `thread_id`；默认
+  mapping keys 是 `commander`、`worker`、`judger`；
 - 每个 pane 已 COMMIT 的 `bootstrap_turn_id` 与 marker；
-- 三个 TUI 共用的 explicit repo Unix endpoint。
+- 全部 TUI 共用的 explicit repo Unix endpoint。
+
+## Four-way API-budget design
+
+`api-budget-design` 是 optional loop，只在用户明确选择它，或明确要求比较 `N=3/4/5/6`
+四种 API-budget 设计时使用。它用同一 `gpt-5.6-sol` model、`high` reasoning effort、
+Fast service tier 和共同设计合同启动四个相互隔离的 designer；唯一实验变量是 role
+profile 中的 `N`：最多 `N` 个 deep modules，且恰好 `N` 个顶层 public APIs。
+
+```bash
+./bin/codex-crew up /path/to/project --loop api-budget-design --json
+```
+
+成功 JSON 的 `thread_mapping` 固定包含：
+
+```text
+designer_3 -> exact native thread_id for N=3
+designer_4 -> exact native thread_id for N=4
+designer_5 -> exact native thread_id for N=5
+designer_6 -> exact native thread_id for N=6
+```
+
+把同一个 new-build 或 migration 请求保存为 `design-request.md`。四次 dispatch 必须读取
+这一个未修改文件，使 request bytes 一致；不要在 request 中注入 `N`，也不要新增 fanout、
+batch 或 aggregator API。将 startup JSON 中的值填入以下变量，并分别保存四次 `send`
+返回的 exact `turn_id`：
+
+```bash
+ENDPOINT='unix:///absolute/path/to/codex-crew/.codex-crew/runtime/app-server.sock'
+DESIGNER_3_THREAD='01...'
+DESIGNER_4_THREAD='01...'
+DESIGNER_5_THREAD='01...'
+DESIGNER_6_THREAD='01...'
+REQUEST_FILE='design-request.md'
+
+./bin/codex-crew crew send --endpoint "$ENDPOINT" --thread-id "$DESIGNER_3_THREAD" --message-file "$REQUEST_FILE" --json
+./bin/codex-crew crew send --endpoint "$ENDPOINT" --thread-id "$DESIGNER_4_THREAD" --message-file "$REQUEST_FILE" --json
+./bin/codex-crew crew send --endpoint "$ENDPOINT" --thread-id "$DESIGNER_5_THREAD" --message-file "$REQUEST_FILE" --json
+./bin/codex-crew crew send --endpoint "$ENDPOINT" --thread-id "$DESIGNER_6_THREAD" --message-file "$REQUEST_FILE" --json
+```
+
+例如把四个返回值分别记为 `TURN_3`、`TURN_4`、`TURN_5`、`TURN_6`，再逐路读取 native
+completion 与 authoritative final：
+
+```bash
+TURN_3='01...'
+TURN_4='01...'
+TURN_5='01...'
+TURN_6='01...'
+
+./bin/codex-crew crew wait --endpoint "$ENDPOINT" --thread-id "$DESIGNER_3_THREAD" --turn-id "$TURN_3" --timeout 120 --json
+./bin/codex-crew crew wait --endpoint "$ENDPOINT" --thread-id "$DESIGNER_4_THREAD" --turn-id "$TURN_4" --timeout 120 --json
+./bin/codex-crew crew wait --endpoint "$ENDPOINT" --thread-id "$DESIGNER_5_THREAD" --turn-id "$TURN_5" --timeout 120 --json
+./bin/codex-crew crew wait --endpoint "$ENDPOINT" --thread-id "$DESIGNER_6_THREAD" --turn-id "$TURN_6" --timeout 120 --json
+
+./bin/codex-crew crew final --endpoint "$ENDPOINT" --thread-id "$DESIGNER_3_THREAD" --turn-id "$TURN_3" --json
+./bin/codex-crew crew final --endpoint "$ENDPOINT" --thread-id "$DESIGNER_4_THREAD" --turn-id "$TURN_4" --json
+./bin/codex-crew crew final --endpoint "$ENDPOINT" --thread-id "$DESIGNER_5_THREAD" --turn-id "$TURN_5" --json
+./bin/codex-crew crew final --endpoint "$ENDPOINT" --thread-id "$DESIGNER_6_THREAD" --turn-id "$TURN_6" --json
+```
+
+四路 thread、context 和 output 完全隔离，不读取彼此结果。每份 final 使用相同 output
+contract：`Assumptions`、`Module map / Deep modules (K <= N)`、
+`Public APIs (exactly N)`、
+`Main sequential flows`、`New-build path` 或 `Migration path`、
+`Discarded abstractions and tradeoffs`、`Budget audit`。最后一节必须报告
+`deep_modules=K/N` 与 `public_apis=N/N`。
+
+Language contract：四个 Designer 的所有 user-facing design output 必须使用中文句法；
+technical identifier、API、module、contract、CLI、schema、file path、error text 与标准
+technical term 保留 English 原名，并自然混排在中文句法中。不要附加逐段或整篇
+English translation。
 
 ## Repository and runtime boundary
 
@@ -59,7 +131,9 @@ runtime artifact 类型冲突时一律 fail closed，并在错误中给出 endpo
 
 ## Runtime model
 
-- 三个 TUI 都以各自的 `--profile`、`--strict-config`、`--yolo`、`--remote`、
+- 两个 repository-owned manifests 的全部 roles 都显式使用 `gpt-5.6-sol`、`high`
+  reasoning effort 与 `service_tier = "fast"`；generated profile 不提供隐式 default。
+- 所选 manifest 的每个 TUI 都以各自的 `--profile`、`--strict-config`、`--yolo`、`--remote`、
   `-C TARGET` 和唯一 bootstrap prompt 启动，不预创建 thread，也不执行
   `codex resume`。
 - launcher 通过 App Server `thread/list` 与 `thread/read`，覆盖 `cli`、`vscode` 两种
@@ -99,9 +173,10 @@ Launch 没有 partial-success 状态。任一 role 在 deadline 内缺失，或 
 包含 exact tmux window ID 与 missing/failed role。已创建的可视 window会保留供诊断，
 launcher 不回退、不猜测 identity。
 
-生产默认 committed-identity deadline 为 120 秒：launch 最多等待 120 秒，让三个
-profiled xhigh identity turns 完成并满足 COMMIT gate。120 秒后仍未全部 COMMIT 才按
-上述规则非零退出；这不是单次 App Server request timeout。
+生产默认 committed-identity deadline 为 120 秒：launch 最多等待 120 秒，让 manifest
+定义的全部 profiled `high` reasoning、Fast service tier identity turns 完成并满足 COMMIT
+gate。120 秒后仍未全部 COMMIT 才按上述规则非零退出；这不是单次 App Server request
+timeout。
 
 启动命令的固定形态为：
 
@@ -173,9 +248,9 @@ Runtime invariants：
 - `turn/completed` 和 final `agentMessage` item 是 completion/final authority；没有
   shared Stop snapshot fallback。
 
-## Commander–Worker–Judger loop
+## Default Commander–Worker–Judger loop
 
-角色固定为 Commander、Worker、Judger：
+默认 `three-agent-dev` 的角色固定为 Commander、Worker、Judger：
 
 - Commander 保持 source-read-only，按 `thread_mapping` 派发一个 bounded Worker
   slice，并用 exact turn wait/final 读取结果。

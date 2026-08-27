@@ -44,6 +44,7 @@ class CrewPane:
     runtime_profile: str
     model: str
     reasoning_effort: str
+    service_tier: str
     bootstrap_marker: str
     thread_id: str
     bootstrap_turn_id: str
@@ -274,6 +275,7 @@ def launch_crew(
                 runtime_profile=role.runtime_profile,
                 model=role.model,
                 reasoning_effort=role.reasoning_effort,
+                service_tier=role.service_tier,
                 bootstrap_marker=markers[role.id],
                 thread_id=discovered[role.id][0],
                 bootstrap_turn_id=discovered[role.id][1],

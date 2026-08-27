@@ -204,6 +204,12 @@ class LauncherTests(unittest.TestCase):
         )
         self.assertNotIn("discovery_complete", result.as_dict())
         self.assertNotIn("discovery_error", result.as_dict())
+        self.assertEqual({"high"}, {pane.reasoning_effort for pane in result.panes})
+        self.assertEqual({"fast"}, {pane.service_tier for pane in result.panes})
+        self.assertEqual(
+            {"fast"},
+            {pane["service_tier"] for pane in result.as_dict()["panes"]},
+        )
         self.assertTrue(state.list_params)
         for params in state.list_params:
             self.assertEqual({"cli", "vscode"}, set(params["sourceKinds"]))
@@ -237,6 +243,71 @@ class LauncherTests(unittest.TestCase):
             runner.calls,
         )
         self.assertFalse(any(command[1] == "set-option" for command in runner.calls))
+
+    def test_api_budget_launch_creates_four_committed_equal_width_roles(self) -> None:
+        state = DiscoveryState()
+        runner = FakeRunner(state)
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / "README.md").write_text("# Product\n", encoding="utf-8")
+            result = launch_crew(
+                project,
+                loop_id="api-budget-design",
+                app_server_endpoint=ENDPOINT,
+                tmux_executable="/tmux",
+                codex_executable="/codex",
+                runner=runner,
+                connection_factory=lambda endpoint: FakeConnection(state, endpoint),
+                marker_factory=lambda: "launch-api-budget",
+            )
+
+        self.assertEqual("api-budget-design", result.loop_id)
+        self.assertEqual("even-horizontal", result.layout)
+        self.assertEqual(
+            {
+                "designer_3": "thread-designer_3",
+                "designer_4": "thread-designer_4",
+                "designer_5": "thread-designer_5",
+                "designer_6": "thread-designer_6",
+            },
+            result.thread_mapping,
+        )
+        self.assertEqual(
+            {
+                "designer_3": "%10",
+                "designer_4": "%11",
+                "designer_5": "%12",
+                "designer_6": "%13",
+            },
+            result.pane_mapping,
+        )
+        self.assertEqual(4, len(result.panes))
+        self.assertEqual({"high"}, {pane.reasoning_effort for pane in result.panes})
+        self.assertEqual({"fast"}, {pane.service_tier for pane in result.panes})
+        self.assertEqual(
+            {"fast"},
+            {pane["service_tier"] for pane in result.as_dict()["panes"]},
+        )
+        self.assertEqual(3, runner.horizontal_splits)
+        self.assertEqual(
+            1,
+            sum(command[1] == "new-window" for command in runner.calls),
+        )
+        self.assertEqual(
+            3,
+            sum(command[1] == "split-window" for command in runner.calls),
+        )
+        for pane in result.panes:
+            self.assertEqual(f"turn-{pane.role}", pane.bootstrap_turn_id)
+            turn = state.threads[pane.thread_id]["turns"][0]
+            self.assertEqual("completed", turn["status"])
+            self.assertEqual(
+                f"role={pane.role}", turn["items"][-1]["text"].splitlines()[0]
+            )
+        self.assertIn(
+            ("/tmux", "select-layout", "-t", "@7", "even-horizontal"),
+            runner.calls,
+        )
 
     def test_discovery_deadline_is_nonzero_failure_and_preserves_window(self) -> None:
         self.assertEqual(120.0, DEFAULT_DISCOVERY_TIMEOUT_SECONDS)

@@ -15,6 +15,8 @@ import unittest
 from unittest.mock import patch
 
 from codex_crew.app_server import (
+    DEFAULT_MAX_FRAME_BYTES,
+    DEFAULT_MAX_MESSAGE_BYTES,
     AppServerAmbiguousRequestError,
     AppServerConnection,
     AppServerError,
@@ -763,6 +765,77 @@ class AppServerTests(unittest.TestCase):
                     with self.assertRaisesRegex(AppServerProtocolError, pattern):
                         connection.request("probe", {})
                 self.assertTrue(connection.closed)
+
+    def test_default_bounds_accept_response_over_previous_two_mib(self) -> None:
+        previous_limit = 2 * 1024 * 1024
+        result_text = "x" * 2_300_000
+
+        def script(connection: socket.socket) -> None:
+            initialized: list[tuple[Frame, dict]] = []
+            _initialize(connection, initialized)
+            _, request = _read_json_frame(connection)
+            _send_json(
+                connection,
+                {"id": request["id"], "result": {"text": result_text}},
+            )
+            _finish_close(connection)
+
+        with FakeUnixWebSocketServer(script) as server:
+            connection = AppServerConnection(server.endpoint)
+            result = connection.request("thread/read", {"includeTurns": True})
+            connection.close()
+
+        self.assertGreater(len(result_text.encode("utf-8")), previous_limit)
+        self.assertLess(len(result_text.encode("utf-8")), DEFAULT_MAX_MESSAGE_BYTES)
+        self.assertEqual(result_text, result["text"])
+
+    def test_default_bounds_still_reject_oversized_frames_and_messages(self) -> None:
+        self.assertEqual(10 * 1024 * 1024, DEFAULT_MAX_FRAME_BYTES)
+        self.assertEqual(10 * 1024 * 1024, DEFAULT_MAX_MESSAGE_BYTES)
+
+        def oversized_frame_script(connection: socket.socket) -> None:
+            initialized: list[tuple[Frame, dict]] = []
+            _initialize(connection, initialized)
+            _read_json_frame(connection)
+            _send_frame(
+                connection,
+                opcode=0x1,
+                payload=b"",
+                declared_length=DEFAULT_MAX_FRAME_BYTES + 1,
+            )
+
+        with FakeUnixWebSocketServer(oversized_frame_script) as server:
+            connection = AppServerConnection(server.endpoint)
+            with self.assertRaisesRegex(
+                AppServerProtocolError,
+                f"frame exceeds {DEFAULT_MAX_FRAME_BYTES} bytes",
+            ):
+                connection.request("thread/read", {"includeTurns": True})
+        self.assertTrue(connection.closed)
+
+        def oversized_message_script(connection: socket.socket) -> None:
+            initialized: list[tuple[Frame, dict]] = []
+            _initialize(connection, initialized)
+            _, request = _read_json_frame(connection)
+            _send_json(
+                connection,
+                {
+                    "id": request["id"],
+                    "result": {"text": "x" * DEFAULT_MAX_MESSAGE_BYTES},
+                },
+            )
+
+        with FakeUnixWebSocketServer(oversized_message_script) as server:
+            connection = AppServerConnection(
+                server.endpoint,
+                max_frame_bytes=DEFAULT_MAX_FRAME_BYTES + 4096,
+            )
+            with self.assertRaisesRegex(
+                AppServerProtocolError,
+                f"message exceeds {DEFAULT_MAX_MESSAGE_BYTES} bytes",
+            ):
+                connection.request("thread/read", {"includeTurns": True})
+        self.assertTrue(connection.closed)
 
     def test_peer_close_before_response_is_ambiguous_and_close_is_idempotent(self) -> None:
         observed_close_replies: list[Frame] = []

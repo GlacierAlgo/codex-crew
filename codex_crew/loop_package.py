@@ -30,6 +30,7 @@ class LoopRole:
     runtime_profile: str
     model: str
     reasoning_effort: str
+    service_tier: str
 
 
 @dataclass(frozen=True)
@@ -136,6 +137,7 @@ def render_profile_adapter(package: LoopPackage, role: LoopRole) -> str:
             f"model = {json.dumps(role.model, ensure_ascii=False)}\n",
             "model_reasoning_effort = "
             f"{json.dumps(role.reasoning_effort, ensure_ascii=False)}\n",
+            f"service_tier = {json.dumps(role.service_tier, ensure_ascii=False)}\n",
             "developer_instructions = "
             f"{json.dumps(instructions, ensure_ascii=False)}\n",
         )
@@ -250,6 +252,7 @@ def _load_manifest(path: Path) -> LoopPackage:
                 reasoning_effort=_required_string(
                     raw_role, "reasoning_effort", path
                 ),
+                service_tier=_required_string(raw_role, "service_tier", path),
             )
         )
 

@@ -15,10 +15,14 @@ from codex_crew.launcher import CrewLaunch, CrewPane, LaunchError
 from codex_crew.startup import StartupError
 
 
-def _launch_result(endpoint: str = "unix://") -> CrewLaunch:
-    roles = ("commander", "worker", "judger")
+def _launch_result(
+    endpoint: str = "unix://",
+    *,
+    loop_id: str = "three-agent-dev",
+    roles: tuple[str, ...] = ("commander", "worker", "judger"),
+) -> CrewLaunch:
     return CrewLaunch(
-        loop_id="three-agent-dev",
+        loop_id=loop_id,
         layout="even-horizontal",
         app_server_endpoint=endpoint,
         session="default",
@@ -30,9 +34,10 @@ def _launch_result(endpoint: str = "unix://") -> CrewLaunch:
             CrewPane(
                 role=role,
                 pane_id=f"%{10 + index}",
-                runtime_profile=f"codex-crew-three-agent-dev-{role}",
+                runtime_profile=f"codex-crew-{loop_id}-{role.replace('_', '-')}",
                 model="gpt-5.6-sol",
-                reasoning_effort="xhigh",
+                reasoning_effort="high",
+                service_tier="fast",
                 bootstrap_marker=f"marker-{role}",
                 thread_id=f"thread-{role}",
                 bootstrap_turn_id=f"turn-{role}",
@@ -73,10 +78,22 @@ class ClickCliTests(unittest.TestCase):
     def test_loop_list_exposes_manifest_contract(self) -> None:
         result = CliRunner().invoke(cli, ["loop", "list", "--json"])
         self.assertEqual(0, result.exit_code, result.output)
-        package = json.loads(result.output)[0]
-        self.assertEqual("three-agent-dev", package["id"])
-        self.assertEqual(["commander", "worker", "judger"], package["roles"])
-        self.assertEqual("even-horizontal", package["layout"])
+        packages = {
+            package["id"]: package for package in json.loads(result.output)
+        }
+        self.assertEqual(
+            {"api-budget-design", "three-agent-dev"}, set(packages)
+        )
+        self.assertEqual(
+            ["commander", "worker", "judger"],
+            packages["three-agent-dev"]["roles"],
+        )
+        self.assertEqual(
+            ["designer_3", "designer_4", "designer_5", "designer_6"],
+            packages["api-budget-design"]["roles"],
+        )
+        self.assertEqual("even-horizontal", packages["three-agent-dev"]["layout"])
+        self.assertEqual("even-horizontal", packages["api-budget-design"]["layout"])
 
     @patch("codex_crew.cli.launch_crew")
     def test_launch_defaults_to_unix_app_server_and_exposes_thread_mapping(
@@ -87,6 +104,9 @@ class ClickCliTests(unittest.TestCase):
         self.assertEqual(0, result.exit_code, result.output)
         payload = json.loads(result.output)
         self.assertEqual("thread-worker", payload["thread_mapping"]["worker"])
+        self.assertEqual(
+            {"fast"}, {pane["service_tier"] for pane in payload["panes"]}
+        )
         self.assertNotIn("transport", payload)
         self.assertNotIn("database_path", payload)
         launch_mock.assert_called_once_with(
@@ -132,6 +152,52 @@ class ClickCliTests(unittest.TestCase):
             session="default",
             window_name=None,
         )
+
+    @patch("codex_crew.cli.up_crew")
+    def test_up_accepts_explicit_four_role_api_budget_loop(self, up_mock) -> None:
+        roles = ("designer_3", "designer_4", "designer_5", "designer_6")
+        up_mock.return_value = _launch_result(
+            "unix:///repo/.codex-crew/runtime/app-server.sock",
+            loop_id="api-budget-design",
+            roles=roles,
+        )
+        result = CliRunner().invoke(
+            cli,
+            [
+                "up",
+                "/project",
+                "--loop",
+                "api-budget-design",
+                "--json",
+            ],
+        )
+
+        self.assertEqual(0, result.exit_code, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual("api-budget-design", payload["loop_id"])
+        self.assertEqual(
+            {role: f"thread-{role}" for role in roles},
+            payload["thread_mapping"],
+        )
+        self.assertEqual(
+            {"fast"}, {pane["service_tier"] for pane in payload["panes"]}
+        )
+        up_mock.assert_called_once_with(
+            Path("/project"),
+            loop_id="api-budget-design",
+            session="default",
+            window_name=None,
+        )
+
+    @patch("codex_crew.cli.launch_crew")
+    def test_launch_human_output_exposes_service_tier(self, launch_mock) -> None:
+        launch_mock.return_value = _launch_result()
+
+        result = CliRunner().invoke(cli, ["launch", "/project"])
+
+        self.assertEqual(0, result.exit_code, result.output)
+        self.assertEqual(3, result.output.count("service_tier=fast"))
+        self.assertEqual(3, result.output.count("reasoning_effort=high"))
 
     @patch("codex_crew.cli.up_crew")
     def test_up_failure_is_nonzero_and_does_not_emit_partial_json(
