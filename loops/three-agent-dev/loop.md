@@ -62,7 +62,9 @@ JUDGER_THREAD=01...
 ```
 
 每轮派发前，Commander 对目标 thread 读取 authoritative status 与 native goal，并设置明确
-round goal；只有用户提供 token budget 时才传 `tokenBudget`。然后派发完整 Worker slice：
+round goal；只有用户提供 token budget 时才传 `tokenBudget`。随后对 exact target 调用一次
+`codex_tui.wait_threads` 的 `timeoutMs: 0` snapshot，保存匹配 `polls[].cursor` 作为
+pre-dispatch baseline；该 snapshot 只取得 cursor，不证明本轮完成。然后派发完整 Worker slice：
 
 ```bash
 codex-crew crew status --endpoint "$ENDPOINT" --thread-id "$WORKER_THREAD" --json
@@ -70,14 +72,39 @@ codex-crew crew send --endpoint "$ENDPOINT" --thread-id "$WORKER_THREAD" \
   --message-file worker-task.md --json
 ```
 
-用返回的 exact `turn_id` 等待并读取 authoritative final：
+保留 exact `thread_id` 和 `crew send` 返回的 exact `turn_id`。以 native tool 作为 primary
+completion wake-up：
+
+```text
+codex_tui.wait_threads({
+  targets: [{threadId: WORKER_THREAD, afterCursor: PRE_DISPATCH_CURSOR}],
+  timeoutMs: 120000
+})
+```
+
+`afterCursor` 必须来自同一 target 的 pre-dispatch snapshot，派发后不得使用 `timeoutMs: 0`，
+也不得省略 cursor 而接受历史 `turnCompleted`。只有 `wake.threadId` 等于 retained
+`thread_id`、`wake.reason` 等于 `turnCompleted`，且 `wake.turnId` 等于 retained `turn_id`
+时才算本轮 completion wake。stale/different-turn wake 是 verification failure；不得转而读取
+latest final。正常 native timeout 继续携带返回的同 thread cursor 做 native wait，不触发 CLI
+fallback。
+
+exact native wake 后，按顺序使用现有 status、exact-turn wait、final 与 native goal 做权威
+复核；此处 `crew wait` 是 post-wake exact-turn verifier，不是 primary wake-up：
 
 ```bash
+codex-crew crew status --endpoint "$ENDPOINT" --thread-id "$WORKER_THREAD" --json
 codex-crew crew wait --endpoint "$ENDPOINT" --thread-id "$WORKER_THREAD" \
   --turn-id "$TURN_ID" --timeout 120 --json
 codex-crew crew final --endpoint "$ENDPOINT" --thread-id "$WORKER_THREAD" \
   --turn-id "$TURN_ID" --json
+codex-crew crew goal get --endpoint "$ENDPOINT" --thread-id "$WORKER_THREAD" --json
 ```
+
+只有 `codex_tui.wait_threads` unavailable 或返回 tool/protocol error 时，才允许用一次 bounded
+CLI `crew wait` 作为 completion wake-up fallback，随后执行相同 exact-turn verification。不得
+重复启动 `crew wait`，也不得对 yielded PTY 重复 `write_stdin` 做 busy polling；不创建
+resident crew daemon。
 
 如果存在 active turn，不得再次 send。只有 exact active precondition 才可追加一次完整
 steer input：
@@ -104,11 +131,12 @@ projection，不是 wire scheme。
 
 1. Commander 定义一个 Worker slice：scope、constraints、acceptance criteria 与最小相关
    verification。
-2. Commander 用 Worker native `thread_id` send，随后 wait exact `turn_id` 并读取 final。
+2. Commander 用 Worker native `thread_id` send，以同 thread pre-dispatch `afterCursor` 调用
+   `codex_tui.wait_threads`，exact-turn wake 后再用 status/wait/final/native goal 复核。
 3. Commander 把 original slice、acceptance criteria、Worker claim 与 README public entry
    points 发给 Judger；不发送 source paths、diff、implementation detail 或 Worker test
    output 作为 acceptance evidence。
-4. Commander 用 Judger native `thread_id` send/wait/final。
+4. Commander 对 Judger 使用同一 native wait_threads + exact-turn verification contract。
 5. `PASS` 后接受；`FAIL` 时只把 reproducible blockers 发回 Worker，再 fresh rejudge。
 6. 重复直到 `PASS` 或真实 user/external blocker。
 
@@ -117,9 +145,10 @@ projection，不是 wire scheme。
 - 每个 target completion 后，Commander 再读取 native goal。每轮必须报告 goal `status`、
   `tokensUsed`、可选 `tokenBudget`、`timeUsedSeconds`，另报 Commander-observed round wall
   elapsed。
-- model token observation 是 optional：只在该 exact `crew wait` 结果包含 `token_usage` 时
-  报告，并标为该 wait 实际观察到的 cumulative value；缺失时明确 unavailable，但不得阻塞
-  round。不得把未观察 baseline 当作 zero，也不得据此虚构 round delta 或 model total。
+- model token observation 是 optional：只在该 exact post-wake verifier 或 fallback
+  `crew wait` 结果包含 `token_usage` 时报告，并标为该 wait 实际观察到的 cumulative value；
+  缺失时明确 unavailable，但不得阻塞 round。不得把未观察 baseline 当作 zero，也不得据此
+  虚构 round delta 或 model total。
 - 展示 optional model breakdown 时，`cachedInputTokens` 是 input subset，不得重复计入，
   其他 nested/subset fields 同理。goal-visible tokens 与 model observation 不混加。
 - 汇总结果、fresh PASS 状态、retries/rejudge count 与 remaining blockers 后，Commander 必须
@@ -168,6 +197,11 @@ Evidence: exit status, stdout/stderr, responses/UI behavior, and public artifact
 - Every operation uses one explicit Unix endpoint plus one exact native `thread_id`.
 - `send` preserves one complete message; `steer` preserves exact turn precondition.
 - Completion comes from `turn/completed`; final comes from authoritative final `agentMessage`.
+- `codex_tui.wait_threads` with the same-thread pre-dispatch `afterCursor` is the primary completion
+  wake-up; exact retained `thread_id`/`turn_id` plus status/wait/final/native-goal verification remain
+  authoritative.
+- CLI wait is a completion wake-up fallback only when native wait_threads is unavailable or errors;
+  there is no repeated shell or PTY polling and no resident crew daemon.
 - Launch success requires a completed authoritative Commander runtime handoff turn.
 - tmux is visual layout only and carries no shared role message or lifecycle state.
 - Native goal accounting is the required per-round token/time surface. Model token observations are

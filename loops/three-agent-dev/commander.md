@@ -35,8 +35,25 @@ Dispatch contract:
 - Set or update one clear native goal for every dispatched target. Include a `tokenBudget` only when the user explicitly supplied one; never invent a budget.
 - Give Worker one bounded slice with scope, constraints, acceptance criteria, relevant public
   contracts, and the smallest relevant verification.
-- Dispatch, steer, wait, final, and goal only through `codex-crew crew --endpoint ... --thread-id
-  ...` commands. Preserve exact active `turn_id` preconditions.
+- Before dispatch, call `codex_tui.wait_threads` once with the exact target `threadId` and
+  `timeoutMs: 0`; save the matching `polls[].cursor` as the pre-dispatch baseline. A missing cursor
+  makes the native wake path unavailable for that dispatch.
+- Dispatch and steer through `codex-crew crew --endpoint ... --thread-id ...` commands. Save both
+  the dispatched exact `thread_id` and the exact `turn_id` returned by `crew send`; never replace
+  either identity with a latest-turn lookup.
+- Use `codex_tui.wait_threads` as the primary completion wake-up with the retained exact
+  `threadId`, the pre-dispatch cursor as `afterCursor`, and a positive bounded `timeoutMs`. Never
+  omit `afterCursor`, reuse a cursor from another thread, or use `timeoutMs: 0` after dispatch.
+- A native wake is completion evidence only when `wake.threadId` equals the retained `thread_id`,
+  `wake.reason` is `turnCompleted`, and `wake.turnId` equals the retained `turn_id`. A stale or
+  different-turn wake is a verification failure, not permission to read the latest final.
+- After an exact native wake, verify in order with existing `crew status`, one `crew wait` for the
+  retained exact turn, `crew final` for that same turn, and native `crew goal get`. Treat this
+  post-wake `crew wait` as an authoritative exact-turn verifier, not as the completion wake-up.
+- Fall back to one bounded CLI `crew wait` completion wake-up only when
+  `codex_tui.wait_threads` is unavailable or returns a tool/protocol error. A normal native timeout
+  is not fallback permission; continue native waiting with the returned matching cursor. Do not
+  launch repeated `crew wait` commands or busy-poll a yielded PTY with repeated `write_stdin`.
 - Never use tmux send-keys, paste buffers, capture-pane, terminal text, prompt appearance, silence,
   or Stop snapshots as shared completion evidence.
 
@@ -49,7 +66,11 @@ Acceptance loop:
 
 Round accounting and response:
 - After each target completes, read its native goal again. Required per-round accounting is native goal `status`, `tokensUsed`, optional `tokenBudget`, and `timeUsedSeconds`, plus Commander-observed round wall elapsed.
-- A model token observation is optional. Report it only when that exact `crew wait` result contains `token_usage`, label it as cumulative and observed by that wait, and disclose when it is unavailable. Missing model usage never blocks the round. Never subtract an unobserved baseline, treat a missing baseline as zero, or fabricate a round model-token delta or total.
+- A model token observation is optional. Report it only when that exact post-wake verifier or
+  fallback `crew wait` result contains `token_usage`, label it as cumulative and observed by that
+  wait, and disclose when it is unavailable. Missing model usage never blocks the round. Never
+  subtract an unobserved baseline, treat a missing baseline as zero, or fabricate a round
+  model-token delta or total.
 - When an optional model breakdown is present, `cachedInputTokens` is a subset of input and must not be added again; do not double-count other nested/subset fields. Goal-visible tokens and model token observations are separate accounting surfaces and must not be mixed.
 - Report accepted scope, Worker/Judger exact thread and turn IDs, focused verification, black-box checks, retries/rejudge count, final verdict, and remaining blockers.
 - End every round by asking the required next-step question and wait. Do not autonomously dispatch a new Worker or Judger turn. Cohort teardown archives recoverable Codex threads and preserves the shared tmux session and App Server.

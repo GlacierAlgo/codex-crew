@@ -59,15 +59,108 @@ class LoopPackageTests(unittest.TestCase):
         self.assertEqual({"high"}, {role.reasoning_effort for role in package.roles})
         self.assertEqual({"fast"}, {role.service_tier for role in package.roles})
         commander = package.roles[0].instructions_path.read_text(encoding="utf-8")
+        normalized_commander = " ".join(commander.split())
         for requirement in (
             "Required per-round accounting is native goal",
             "A model token observation is optional",
-            "exact `crew wait` result",
+            "exact post-wake verifier",
             "Missing model usage never blocks the round",
             "Never subtract an unobserved baseline",
             "`cachedInputTokens`",
         ):
-            self.assertIn(requirement, commander)
+            self.assertIn(requirement, normalized_commander)
+
+    def test_three_agent_primary_completion_path_uses_native_wait_threads(self) -> None:
+        package = load_loop_package("three-agent-dev")
+        commander_role = package.roles[0]
+        commander = commander_role.instructions_path.read_text(encoding="utf-8")
+        manual = package.manual_path.read_text(encoding="utf-8")
+        adapter = render_profile_adapter(package, commander_role)
+
+        for contract in (commander, manual, adapter):
+            normalized = " ".join(contract.split())
+            self.assertIn("codex_tui.wait_threads", normalized)
+            self.assertIn("primary completion wake-up", normalized)
+            self.assertIn("afterCursor", normalized)
+        self.assertLess(
+            manual.index("codex_tui.wait_threads"),
+            manual.index("codex-crew crew send"),
+        )
+        self.assertLess(
+            manual.index("codex-crew crew send"),
+            manual.index("post-wake exact-turn verifier"),
+        )
+
+    def test_three_agent_native_wait_rejects_stale_history(self) -> None:
+        package = load_loop_package("three-agent-dev")
+        commander = package.roles[0].instructions_path.read_text(encoding="utf-8")
+        manual = package.manual_path.read_text(encoding="utf-8")
+
+        for contract in (commander, manual):
+            normalized = " ".join(contract.split())
+            self.assertIn("pre-dispatch", normalized)
+            self.assertIn("afterCursor", normalized)
+            self.assertIn("timeoutMs: 0", normalized)
+            self.assertIn("stale", normalized)
+        self.assertIn("Never omit `afterCursor`", " ".join(commander.split()))
+        self.assertIn(
+            "不得省略 cursor 而接受历史 `turnCompleted`", " ".join(manual.split())
+        )
+
+    def test_three_agent_native_wake_requires_retained_exact_turn(self) -> None:
+        package = load_loop_package("three-agent-dev")
+        commander = package.roles[0].instructions_path.read_text(encoding="utf-8")
+        manual = package.manual_path.read_text(encoding="utf-8")
+
+        for contract in (commander, manual):
+            normalized = " ".join(contract.split())
+            for requirement in (
+                "wake.threadId",
+                "wake.reason",
+                "turnCompleted",
+                "wake.turnId",
+                "retained `turn_id`",
+            ):
+                self.assertIn(requirement, normalized)
+        for verifier in (
+            "crew status",
+            "crew wait",
+            "crew final",
+            "crew goal get",
+        ):
+            self.assertIn(verifier, manual)
+
+    def test_three_agent_cli_wait_is_error_only_fallback(self) -> None:
+        package = load_loop_package("three-agent-dev")
+        commander = package.roles[0].instructions_path.read_text(encoding="utf-8")
+        manual = package.manual_path.read_text(encoding="utf-8")
+        normalized_commander = " ".join(commander.split())
+        normalized_manual = " ".join(manual.split())
+
+        self.assertIn(
+            "unavailable or returns a tool/protocol error", normalized_commander
+        )
+        self.assertIn(
+            "A normal native timeout is not fallback permission", normalized_commander
+        )
+        self.assertIn("unavailable 或返回 tool/protocol error", normalized_manual)
+        self.assertIn("正常 native timeout", normalized_manual)
+
+    def test_three_agent_completion_has_no_repeated_shell_or_pty_polling(self) -> None:
+        package = load_loop_package("three-agent-dev")
+        commander = package.roles[0].instructions_path.read_text(encoding="utf-8")
+        manual = package.manual_path.read_text(encoding="utf-8")
+        normalized_commander = " ".join(commander.split())
+        normalized_manual = " ".join(manual.split())
+
+        self.assertEqual(1, manual.count("codex-crew crew wait --endpoint"))
+        self.assertNotIn("write_stdin(", manual)
+        self.assertNotIn("write_stdin(", commander)
+        self.assertIn(
+            "Do not launch repeated `crew wait` commands", normalized_commander
+        )
+        self.assertIn("there is no repeated shell or PTY polling", normalized_manual)
+        self.assertIn("不创建 resident crew daemon", normalized_manual)
 
     def test_service_tier_is_required_nonempty_role_authority(self) -> None:
         for label, service_tier_line in (
@@ -485,8 +578,10 @@ layout = "split-plan"
         expected_commands = (
             "crew status",
             "crew send",
+            "crew status",
             "crew wait",
             "crew final",
+            "crew goal get",
             "crew steer",
             "crew goal get",
             "crew goal set",

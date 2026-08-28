@@ -117,16 +117,24 @@ success。
 
 1. 收到用户 task/request 后，先读取目标 threads 的 authoritative status 与 native goal，
    设置明确 round goal；用户未提供 token budget 时不创建 budget；
-2. 使用 explicit endpoint + exact `thread_id` 和 `crew send`/`wait`/`final` 派发并收集，
-   active turn 不重复 send；
+2. 派发前用 exact target 的 `codex_tui.wait_threads(timeoutMs: 0)` snapshot 保存 baseline
+   cursor；`crew send` 后保留 exact `thread_id` 与返回的 exact `turn_id`，再以同 thread
+   `afterCursor` 的 `codex_tui.wait_threads` 作为 primary completion wake-up；active turn 不重复
+   send；
 3. 每个 target 完成后读取 native goal；必须报告 goal `status`、`tokensUsed`、可选
    `tokenBudget`、`timeUsedSeconds`，以及 communication role 观察到的 round wall elapsed；
-4. model token observation 是 optional：仅当对应 exact `crew wait` 返回 `token_usage` 时，
-   才将其标为该 wait 实际观察到的 cumulative value；缺失必须披露但不阻塞 round。不得将
-   未观察 baseline 当作 zero，也不得虚构 round delta 或 model total。展示 optional breakdown
-   时，`cachedInputTokens` 是 input subset，不重复相加；goal-visible tokens 与 model
-   observation 不混加；
-5. 汇总结果、验收/比较状态、retries 与 remaining blockers，然后询问用户继续、补充/
+4. exact native wake 必须同时匹配 retained `thread_id`、`turn_id` 与 `turnCompleted`，随后按
+   `crew status`、exact-turn `crew wait`、`crew final`、native goal 的顺序复核；stale history、
+   latest turn 或 different-turn wake 都不得替代 retained identity；
+5. model token observation 是 optional：仅当对应 exact post-wake verifier 或 fallback
+   `crew wait` 返回 `token_usage` 时，才将其标为该 wait 实际观察到的 cumulative value；缺失
+   必须披露但不阻塞 round。不得将未观察 baseline 当作 zero，也不得虚构 round delta 或
+   model total。展示 optional breakdown 时，`cachedInputTokens` 是 input subset，不重复相加；
+   goal-visible tokens 与 model observation 不混加；
+6. 只有 `codex_tui.wait_threads` unavailable 或返回 tool/protocol error 时，才用一次 bounded
+   CLI `crew wait` 作为 completion wake-up fallback；正常 native timeout 继续使用返回 cursor，
+   不重复启动 shell wait、不 busy-poll PTY，也不引入 resident crew daemon；
+7. 汇总结果、验收/比较状态、retries 与 remaining blockers，然后询问用户继续、补充/
    修正，还是结束并回收。未收到用户下一步前不得开始新一轮。
 
 ## Recoverable crew teardown
@@ -388,7 +396,9 @@ Runtime invariants：
 communication role：
 
 - Commander 保持 source-read-only，从 automatic handoff 保存 exact mappings，按用户请求
-  派发一个 bounded Worker slice，并用 exact turn wait/final 读取结果。
+  派发一个 bounded Worker slice；派发前取得 same-thread cursor，派发后用
+  `codex_tui.wait_threads` + `afterCursor` 做 primary wake，再用 retained exact turn 的
+  status/wait/final/native goal 复核结果。
 - Worker 是唯一可修改 shared worktree 的角色，运行最小相关验证并按固定 contract
   回报。
 - Judger 保持 source-read-only，只读取本 README，通过这里记录的 public commands
